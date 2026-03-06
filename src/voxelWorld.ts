@@ -1,7 +1,7 @@
 import * as THREE from "three";
 
 export const CHUNK_SIZE = 16;
-export const WORLD_HEIGHT = 48;
+export const WORLD_HEIGHT = 256;
 export const RENDER_DISTANCE = 4;
 export const EYE_HEIGHT = 1.62;
 export const PLAYER_WIDTH = 0.6;
@@ -17,6 +17,7 @@ export enum BlockId {
   Stone = 3,
   Log = 4,
   Leaves = 5,
+  Bedrock = 6,
 }
 
 interface ChunkEntry {
@@ -52,6 +53,7 @@ const TEXTURE_INDEX = {
   logSide: 4,
   logTop: 5,
   leaves: 6,
+  bedrock: 7,
 };
 
 const FACE_DEFS = [
@@ -151,7 +153,7 @@ export class VoxelWorld {
   }
 
   getBlock(x: number, y: number, z: number): BlockId {
-    if (y < 0) return BlockId.Stone;
+    if (y < 0) return BlockId.Bedrock;
     if (y >= WORLD_HEIGHT) return BlockId.Air;
 
     const editKey = blockKey(x, y, z);
@@ -408,6 +410,10 @@ export class VoxelWorld {
   }
 
   private sampleGeneratedBlock(x: number, y: number, z: number): BlockId {
+    // Bedrock floor: 1-4 uneven layers at the bottom
+    const bedrockHeight = 1 + Math.floor(value2D(x * 0.15, z * 0.15, 999) * 4);
+    if (y < bedrockHeight) return BlockId.Bedrock;
+
     const surface = this.surfaceHeight(x, z);
     if (y > surface) {
       return sampleTreeBlock(x, y, z, this.surfaceHeight.bind(this));
@@ -421,10 +427,11 @@ export class VoxelWorld {
     const continental = fbm2D(x * 0.003, z * 0.003, 4, 2) * 18;
     const hills = fbm2D(x * 0.012, z * 0.012, 3, 11) * 7;
     const detail = fbm2D(x * 0.04, z * 0.04, 2, 37) * 2;
-    const raw = 18 + continental + hills + detail;
+    const baseHeight = 64;
+    const raw = baseHeight + continental + hills + detail;
     const dist = Math.sqrt(x * x + z * z);
     const spawnBlend = Math.max(0, 1 - dist / 18);
-    const flattened = lerp(raw, 18, spawnBlend);
+    const flattened = lerp(raw, baseHeight, spawnBlend);
     return Math.max(6, Math.min(WORLD_HEIGHT - 8, Math.floor(flattened)));
   }
 
@@ -474,6 +481,7 @@ function blockFaceTile(block: BlockId, faceIndex: number) {
   if (block === BlockId.Stone) return TEXTURE_INDEX.stone;
   if (block === BlockId.Log) return faceIndex === 2 || faceIndex === 3 ? TEXTURE_INDEX.logTop : TEXTURE_INDEX.logSide;
   if (block === BlockId.Leaves) return TEXTURE_INDEX.leaves;
+  if (block === BlockId.Bedrock) return TEXTURE_INDEX.bedrock;
   return TEXTURE_INDEX.stone;
 }
 
@@ -611,6 +619,7 @@ function createAtlasTexture() {
   drawLogSide(ctx, 4);
   drawLogTop(ctx, 5);
   drawLeaves(ctx, 6);
+  drawBedrock(ctx, 7);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.magFilter = THREE.NearestFilter;
@@ -683,6 +692,18 @@ function drawLeaves(ctx: CanvasRenderingContext2D, tile: number) {
   sprinkle(ctx, tile, "#9bff8d", 43, 0.17);
   sprinkle(ctx, tile, "#0e6f2a", 33, 0.15);
   addTileRim(ctx, tile, "#c6ff9f", "#0d5d22");
+}
+
+function drawBedrock(ctx: CanvasRenderingContext2D, tile: number) {
+  paintBase(ctx, tile, "#1a1a1e");
+  checker(ctx, tile, "#222226", "#141418");
+  sprinkle(ctx, tile, "#0d0d10", 61, 0.2);
+  sprinkle(ctx, tile, "#2a2a30", 77, 0.12);
+  // Blue crystal specks
+  sprinkle(ctx, tile, "#3366cc", 83, 0.08);
+  sprinkle(ctx, tile, "#5588ee", 91, 0.04);
+  sprinkle(ctx, tile, "#88aaff", 97, 0.02);
+  addTileRim(ctx, tile, "#2a2a34", "#0a0a0e");
 }
 
 function paintBase(ctx: CanvasRenderingContext2D, tile: number, color: string) {

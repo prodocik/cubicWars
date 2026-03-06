@@ -200,6 +200,7 @@ function handleSetBlock(player: ServerPlayer, msg: SetBlockMessage) {
   const block = Math.floor(sanitizeCoord(msg.block, BlockId.Air));
 
   if (y < 0 || y >= WORLD_HEIGHT) return;
+  if (getBlock(x, y, z) === BlockId.Bedrock && block === BlockId.Air) return;
   blockEdits.set(editKey(x, y, z), block);
   broadcast({ type: "set_block", by: player.id, x, y, z, block }, player.id);
 }
@@ -267,7 +268,7 @@ function handleHitPlayer(attacker: ServerPlayer, msg: HitPlayerMessage) {
 }
 
 function getBlock(x: number, y: number, z: number): BlockId {
-  if (y < 0) return BlockId.Stone;
+  if (y < 0) return BlockId.Bedrock;
   if (y >= WORLD_HEIGHT) return BlockId.Air;
 
   const edited = blockEdits.get(editKey(x, y, z));
@@ -276,6 +277,9 @@ function getBlock(x: number, y: number, z: number): BlockId {
 }
 
 function sampleGeneratedBlock(x: number, y: number, z: number): BlockId {
+  const bedrockHeight = 1 + Math.floor(value2D(x * 0.15, z * 0.15, 999) * 4);
+  if (y < bedrockHeight) return BlockId.Bedrock;
+
   const surface = surfaceHeight(x, z);
   if (y > surface) {
     return sampleTreeBlock(x, y, z);
@@ -289,10 +293,11 @@ function surfaceHeight(x: number, z: number) {
   const continental = fbm2D(x * 0.003, z * 0.003, 4, 2) * 18;
   const hills = fbm2D(x * 0.012, z * 0.012, 3, 11) * 7;
   const detail = fbm2D(x * 0.04, z * 0.04, 2, 37) * 2;
-  const raw = 18 + continental + hills + detail;
+  const baseHeight = 64;
+  const raw = baseHeight + continental + hills + detail;
   const dist = Math.sqrt(x * x + z * z);
   const spawnBlend = Math.max(0, 1 - dist / 18);
-  const flattened = lerp(raw, 18, spawnBlend);
+  const flattened = lerp(raw, baseHeight, spawnBlend);
   return Math.max(6, Math.min(WORLD_HEIGHT - 8, Math.floor(flattened)));
 }
 

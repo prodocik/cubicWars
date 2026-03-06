@@ -71,7 +71,7 @@ const INTERACT_DISTANCE = 6;
 const PHYSICS_STEP = 1 / 120;
 const MAX_PHYSICS_STEPS = 8;
 const GROUND_CHECK = 0.05;
-const SAFE_FALL_RESET_Y = -16;
+const SAFE_FALL_RESET_Y = -8;
 const SWEEP_EPSILON = 1e-4;
 const REMOTE_SMOOTHING = 14;
 const CHAT_BUBBLE_DURATION_MS = 7000;
@@ -706,6 +706,8 @@ function wireInput() {
 function breakBlock() {
   const hit = getTargetedBlock();
   if (!hit) return;
+  const block = world.getBlock(hit.block.x, hit.block.y, hit.block.z);
+  if (block === BlockId.Bedrock) return;
   world.setBlock(hit.block.x, hit.block.y, hit.block.z, BlockId.Air);
   sendBlockUpdate(hit.block.x, hit.block.y, hit.block.z, BlockId.Air);
 }
