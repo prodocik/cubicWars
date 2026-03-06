@@ -73,6 +73,10 @@ const SWEEP_EPSILON = 1e-4;
 const REMOTE_SMOOTHING = 14;
 const CHAT_BUBBLE_DURATION_MS = 7000;
 const MAX_CHAT_LENGTH = 120;
+const ARROW_SPEED = 48;
+const ARROW_MAX_DISTANCE = CHUNK_SIZE * (RENDER_DISTANCE + 2);
+const ARROW_GRAVITY = 14;
+const MAX_STUCK_ARROWS = 20;
 const BODY_WIDTH = PLAYER_RADIUS * 2;
 const BODY_HEIGHT = PLAYER_HEIGHT;
 const BODY_RADIUS = PLAYER_RADIUS;
@@ -87,6 +91,18 @@ scene.fog = new THREE.Fog("#87c7ff", CHUNK_SIZE * (RENDER_DISTANCE + 1), CHUNK_S
 scene.add(world.scene);
 const remotePlayersLayer = new THREE.Group();
 scene.add(remotePlayersLayer);
+const arrowsLayer = new THREE.Group();
+scene.add(arrowsLayer);
+
+interface FlyingArrow {
+  mesh: THREE.Group;
+  velocity: THREE.Vector3;
+  origin: THREE.Vector3;
+  alive: boolean;
+}
+
+const flyingArrows: FlyingArrow[] = [];
+const stuckArrows: THREE.Group[] = [];
 
 const cameraRig = new THREE.Group();
 const cameraPitch = new THREE.Group();
@@ -239,6 +255,7 @@ function animate() {
   if (physicsSteps === MAX_PHYSICS_STEPS) physicsAccumulator = 0;
 
   updateHeldItem(frameDt);
+  updateArrows(frameDt);
   updateRemotePlayers(frameDt);
   updateCamera();
   updateDebugColliders();
@@ -653,7 +670,12 @@ function wireInput() {
   window.addEventListener("mousedown", (event) => {
     if (!pointerLocked) return;
     if (event.button === 0) {
-      breakBlock();
+      const selected = hotbarItems[selectedSlot];
+      if (selected.id === "bow") {
+        shootArrow();
+      } else {
+        breakBlock();
+      }
     } else if (event.button === 2) {
       placeBlock();
     }
@@ -796,6 +818,98 @@ function createBowMesh() {
   group.add(left, right, grip, string);
   group.rotation.set(0.5, 1.05, 0.25);
   return group;
+}
+
+function createArrowMesh() {
+  const group = new THREE.Group();
+  const shaftMat = new THREE.MeshLambertMaterial({ color: 0x8b6914 });
+  const tipMat = new THREE.MeshLambertMaterial({ color: 0xaab0b8 });
+  const fletchMat = new THREE.MeshLambertMaterial({ color: 0xd4d0c8 });
+
+  const shaft = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 1.0), shaftMat);
+  const tip = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.18), tipMat);
+  tip.position.z = 0.55;
+  const fletch1 = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.02, 0.2), fletchMat);
+  fletch1.position.z = -0.4;
+  const fletch2 = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.16, 0.2), fletchMat);
+  fletch2.position.z = -0.4;
+
+  group.add(shaft, tip, fletch1, fletch2);
+  return group;
+}
+
+function shootArrow() {
+  const origin = new THREE.Vector3();
+  camera.getWorldPosition(origin);
+  const direction = new THREE.Vector3();
+  camera.getWorldDirection(direction);
+
+  const mesh = createArrowMesh();
+  mesh.position.copy(origin).addScaledVector(direction, 0.8);
+  mesh.lookAt(mesh.position.clone().add(direction));
+  arrowsLayer.add(mesh);
+
+  flyingArrows.push({
+    mesh,
+    velocity: direction.clone().multiplyScalar(ARROW_SPEED),
+    origin: origin.clone(),
+    alive: true,
+  });
+}
+
+function updateArrows(dt: number) {
+  const step = new THREE.Vector3();
+
+  for (const arrow of flyingArrows) {
+    if (!arrow.alive) continue;
+
+    arrow.velocity.y -= ARROW_GRAVITY * dt;
+    step.copy(arrow.velocity).multiplyScalar(dt);
+
+    const prevPos = arrow.mesh.position.clone();
+    const nextPos = prevPos.clone().add(step);
+
+    // Raycast along movement to detect block hit
+    const moveDir = step.clone();
+    const moveLen = moveDir.length();
+    if (moveLen > 0) {
+      moveDir.divideScalar(moveLen);
+      const hit = world.raycast(prevPos, moveDir, moveLen + 0.15);
+      if (hit) {
+        // Stick into the block surface
+        arrow.mesh.position.copy(prevPos).addScaledVector(moveDir, hit.distance - 0.05);
+        arrow.mesh.lookAt(arrow.mesh.position.clone().add(arrow.velocity));
+        stickArrow(arrow);
+        continue;
+      }
+    }
+
+    arrow.mesh.position.copy(nextPos);
+    arrow.mesh.lookAt(nextPos.clone().add(arrow.velocity));
+
+    // Remove if too far
+    if (prevPos.distanceTo(arrow.origin) > ARROW_MAX_DISTANCE) {
+      arrowsLayer.remove(arrow.mesh);
+      disposeObject3D(arrow.mesh);
+      arrow.alive = false;
+    }
+  }
+
+  // Clean up dead flying arrows
+  for (let i = flyingArrows.length - 1; i >= 0; i--) {
+    if (!flyingArrows[i].alive) flyingArrows.splice(i, 1);
+  }
+}
+
+function stickArrow(arrow: FlyingArrow) {
+  arrow.alive = false;
+  stuckArrows.push(arrow.mesh);
+
+  while (stuckArrows.length > MAX_STUCK_ARROWS) {
+    const old = stuckArrows.shift()!;
+    arrowsLayer.remove(old);
+    disposeObject3D(old);
+  }
 }
 
 function createHud() {
