@@ -346,6 +346,19 @@ function recoverPlayer() {
     physicsAccumulator = 0;
     return;
   }
+  // Try pushing upward to escape placed blocks
+  const probe = player.position.clone();
+  for (let dy = 1; dy <= 8; dy++) {
+    probe.y = player.position.y + dy;
+    if (isPositionSafe(probe)) {
+      player.position.copy(probe);
+      player.lastSafePosition.copy(probe);
+      player.velocity.set(0, 0, 0);
+      player.onGround = false;
+      physicsAccumulator = 0;
+      return;
+    }
+  }
   respawnPlayer();
 }
 
@@ -1235,6 +1248,9 @@ function handleServerMessage(message: ServerMessage) {
     }
     case "set_block":
       world.setBlock(message.x, message.y, message.z, message.block as BlockId);
+      if (!isPositionSafe(player.position)) {
+        recoverPlayer();
+      }
       break;
     case "chat":
       gameLog.chat(message.name, message.text);
