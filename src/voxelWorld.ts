@@ -166,7 +166,7 @@ export class VoxelWorld {
   }
 
   isCollidable(block: BlockId) {
-    return block !== BlockId.Air && block !== BlockId.Leaves;
+    return block !== BlockId.Air;
   }
 
   collides(min: THREE.Vector3, max: THREE.Vector3) {

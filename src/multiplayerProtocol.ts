@@ -4,6 +4,7 @@ export const SERVER_TICK_RATE = 20;
 export interface RemotePlayerState {
   id: string;
   name: string;
+  appearanceSeed: number;
   x: number;
   y: number;
   z: number;
@@ -22,6 +23,7 @@ export interface BlockEditState {
 export interface JoinMessage {
   type: "join";
   name: string;
+  appearanceSeed: number;
   x: number;
   y: number;
   z: number;

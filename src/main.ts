@@ -29,6 +29,7 @@ interface HotbarItem {
 interface RemoteAvatar {
   id: string;
   name: string;
+  appearanceSeed: number;
   root: THREE.Group;
   headPitch: THREE.Group;
   leftArm: THREE.Group;
@@ -174,6 +175,7 @@ const networkState = {
   started: false,
   myId: "",
   playerName: "",
+  appearanceSeed: 0,
   serverUrl: getDefaultServerUrl(),
   serverCandidates: [] as string[],
   currentServerIndex: 0,
@@ -1002,6 +1004,7 @@ function buildServerCandidates(preferredUrl: string) {
 function startMultiplayer(playerName: string, serverUrl: string) {
   networkState.started = true;
   networkState.playerName = playerName;
+  networkState.appearanceSeed = createAppearanceSeed();
   networkState.lastError = "";
   networkState.serverCandidates = buildServerCandidates(serverUrl);
   networkState.currentServerIndex = 0;
@@ -1037,6 +1040,7 @@ function connectMultiplayer() {
     ws.send(JSON.stringify({
       type: "join",
       name: networkState.playerName,
+      appearanceSeed: networkState.appearanceSeed,
       x: player.position.x,
       y: player.position.y,
       z: player.position.z,
@@ -1189,14 +1193,20 @@ function updateRemotePlayers(dt: number) {
 
 function upsertRemotePlayer(state: RemotePlayerState, snapNow: boolean) {
   let avatar = remotePlayers.get(state.id);
+  if (avatar && avatar.appearanceSeed !== state.appearanceSeed) {
+    removeRemotePlayer(state.id);
+    avatar = undefined;
+  }
+
   if (!avatar) {
     avatar = createRemotePlayer(state);
     remotePlayers.set(state.id, avatar);
   }
 
   avatar.name = state.name;
+  avatar.appearanceSeed = state.appearanceSeed;
   avatar.targetPosition.set(state.x, state.y, state.z);
-  avatar.targetYaw = state.yaw;
+  avatar.targetYaw = state.yaw + Math.PI;
   avatar.targetPitch = state.pitch;
 
   if (avatar.heldItemId !== state.heldItemId) {
@@ -1219,7 +1229,7 @@ function createRemotePlayer(state: RemotePlayerState) {
   const leftLeg = new THREE.Group();
   const rightLeg = new THREE.Group();
   const heldPivot = new THREE.Group();
-  const palette = createAvatarPalette(state.name);
+  const palette = createAvatarPalette(state.appearanceSeed);
   const shirtMaterial = new THREE.MeshLambertMaterial({ color: palette.shirt });
   const shirtAccentMaterial = new THREE.MeshLambertMaterial({ color: palette.shirtAccent });
   const sleeveMaterial = new THREE.MeshLambertMaterial({ color: palette.sleeve });
@@ -1298,13 +1308,14 @@ function createRemotePlayer(state: RemotePlayerState) {
 
   root.add(torso, shirtStripe, shirtHem, collar, leftLeg, rightLeg, leftArm, rightArm, headPitch, label);
   root.position.set(state.x, state.y, state.z);
-  root.rotation.y = state.yaw;
+  root.rotation.y = state.yaw + Math.PI;
   headPitch.rotation.x = state.pitch;
   remotePlayersLayer.add(root);
 
   const avatar: RemoteAvatar = {
     id: state.id,
     name: state.name,
+    appearanceSeed: state.appearanceSeed,
     root,
     headPitch,
     leftArm,
@@ -1315,7 +1326,7 @@ function createRemotePlayer(state: RemotePlayerState) {
     heldItemMesh: null,
     label,
     targetPosition: new THREE.Vector3(state.x, state.y, state.z),
-    targetYaw: state.yaw,
+    targetYaw: state.yaw + Math.PI,
     targetPitch: state.pitch,
     heldItemId: "",
     lastVisualPosition: new THREE.Vector3(state.x, state.y, state.z),
@@ -1402,28 +1413,26 @@ function disposeObject3D(object: THREE.Object3D) {
   });
 }
 
-function colorFromName(name: string) {
-  const hue = Math.abs(hashFromName(name)) % 360;
-  const color = new THREE.Color();
-  color.setHSL(hue / 360, 0.55, 0.58);
-  return color.getHex();
+function createAppearanceSeed() {
+  const values = new Uint32Array(1);
+  crypto.getRandomValues(values);
+  return Math.max(1, values[0] & 0x7fffffff);
 }
 
-function createAvatarPalette(name: string) {
-  const hash = Math.abs(hashFromName(name));
+function createAvatarPalette(seed: number) {
+  const random = createSeededRandom(seed);
 
-  const shirt = new THREE.Color(colorFromName(name));
-  shirt.getHSL(tempHslB);
-  shirt.setHSL(tempHslB.h, Math.min(0.74, tempHslB.s + 0.08), 0.52);
+  const shirt = new THREE.Color();
+  shirt.setHSL(random(), 0.55 + random() * 0.22, 0.43 + random() * 0.16);
 
   const pants = new THREE.Color();
-  pants.setHSL((212 + (hash % 24)) / 360, 0.44, 0.36);
+  pants.setHSL(0.52 + random() * 0.18, 0.28 + random() * 0.24, 0.23 + random() * 0.16);
 
   const hair = new THREE.Color();
-  hair.setHSL((28 + (hash % 18)) / 360, 0.32, 0.17 + ((hash >> 3) % 6) * 0.025);
+  hair.setHSL(0.05 + random() * 0.08, 0.16 + random() * 0.24, 0.08 + random() * 0.24);
 
   const skin = new THREE.Color();
-  skin.setHSL((24 + (hash % 14)) / 360, 0.58, 0.72 - ((hash >> 5) % 5) * 0.04);
+  skin.setHSL(0.05 + random() * 0.05, 0.45 + random() * 0.18, 0.6 + random() * 0.18);
 
   return {
     shirt: shirt.getHex(),
@@ -1436,12 +1445,15 @@ function createAvatarPalette(name: string) {
   };
 }
 
-function hashFromName(name: string) {
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
-  }
-  return hash;
+function createSeededRandom(seed: number) {
+  let state = (seed >>> 0) || 1;
+  return () => {
+    state += 0x6d2b79f5;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 function shiftColor(hex: number, lightnessScale: number) {

@@ -65,6 +65,11 @@ function sanitizeHeldItemId(value: unknown) {
   return value.slice(0, 32) || "block:1";
 }
 
+function sanitizeAppearanceSeed(value: unknown, fallback = 1) {
+  if (!isFiniteNumber(value)) return fallback;
+  return Math.floor(clamp(Math.abs(value), 1, 0x7fffffff));
+}
+
 function parseJoinMessage(raw: unknown): JoinMessage | null {
   if (!raw || typeof raw !== "object") return null;
   const msg = raw as Record<string, unknown>;
@@ -72,6 +77,7 @@ function parseJoinMessage(raw: unknown): JoinMessage | null {
   return {
     type: "join",
     name: sanitizeName(msg.name),
+    appearanceSeed: sanitizeAppearanceSeed(msg.appearanceSeed, 1),
     x: sanitizeCoord(msg.x, 0.5),
     y: sanitizeHeight(msg.y, 24),
     z: sanitizeCoord(msg.z, 0.5),
@@ -95,6 +101,7 @@ function playerPublicState(player: ServerPlayer): RemotePlayerState {
   return {
     id: player.id,
     name: player.name,
+    appearanceSeed: player.appearanceSeed,
     x: player.x,
     y: player.y,
     z: player.z,
@@ -224,7 +231,7 @@ function hasTree(x: number, z: number) {
 }
 
 function isCollidable(block: BlockId) {
-  return block !== BlockId.Air && block !== BlockId.Leaves;
+  return block !== BlockId.Air;
 }
 
 function collides(minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number) {
@@ -395,6 +402,7 @@ wss.on("connection", (ws) => {
         id: String(nextPlayerId++),
         ws,
         name: join.name,
+        appearanceSeed: join.appearanceSeed,
         x: join.x,
         y: join.y,
         z: join.z,
