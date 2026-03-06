@@ -102,10 +102,13 @@ export class VoxelWorld {
 
   private chunks = new Map<string, ChunkEntry>();
   private edits = new Map<string, BlockId>();
+  private editMaxY = new Map<string, number>(); // per-chunk max edit Y
   private buildQueue: string[] = [];
+  private buildQueueHead = 0;
   private queued = new Set<string>();
   private targetChunkX = Number.NaN;
   private targetChunkZ = Number.NaN;
+  private surfaceCache = new Map<string, number>();
 
   constructor() {
     this.atlas = createAtlasTexture();
@@ -123,13 +126,17 @@ export class VoxelWorld {
     }
 
     let budget = CHUNK_BUILD_BUDGET;
-    while (budget > 0 && this.buildQueue.length > 0) {
-      const key = this.buildQueue.shift()!;
+    while (budget > 0 && this.buildQueueHead < this.buildQueue.length) {
+      const key = this.buildQueue[this.buildQueueHead++];
       this.queued.delete(key);
       const chunk = this.chunks.get(key);
       if (!chunk) continue;
       this.rebuildChunk(chunk);
       budget--;
+    }
+    if (this.buildQueueHead > 0 && this.buildQueueHead >= this.buildQueue.length) {
+      this.buildQueue.length = 0;
+      this.buildQueueHead = 0;
     }
 
     for (const chunk of this.chunks.values()) {
@@ -137,6 +144,9 @@ export class VoxelWorld {
       chunk.fade = Math.min(1, chunk.fade + dt * CHUNK_FADE_IN_SPEED);
       const material = chunk.mesh.material as THREE.MeshLambertMaterial;
       material.opacity = chunk.fade;
+      if (chunk.fade >= 1) {
+        material.transparent = false;
+      }
     }
   }
 
@@ -166,6 +176,12 @@ export class VoxelWorld {
   setBlock(x: number, y: number, z: number, block: BlockId) {
     if (y < 0 || y >= WORLD_HEIGHT) return;
     this.edits.set(blockKey(x, y, z), block);
+    // Track max edit Y per chunk for fast maxY lookup
+    if (block !== BlockId.Air) {
+      const ck = chunkKey(worldToChunk(x), worldToChunk(z));
+      const prev = this.editMaxY.get(ck) ?? 0;
+      if (y > prev) this.editMaxY.set(ck, y);
+    }
     this.markChunkDirty(worldToChunk(x), worldToChunk(z));
     if (mod(x, CHUNK_SIZE) === 0) this.markChunkDirty(worldToChunk(x - 1), worldToChunk(z));
     if (mod(x, CHUNK_SIZE) === CHUNK_SIZE - 1) this.markChunkDirty(worldToChunk(x + 1), worldToChunk(z));
@@ -305,6 +321,14 @@ export class VoxelWorld {
       }
       this.chunks.delete(key);
       this.queued.delete(key);
+      // Clear surface cache for unloaded chunk area
+      const sx = chunk.cx * CHUNK_SIZE;
+      const sz = chunk.cz * CHUNK_SIZE;
+      for (let z = sz - 1; z <= sz + CHUNK_SIZE; z++) {
+        for (let x = sx - 1; x <= sx + CHUNK_SIZE; x++) {
+          this.surfaceCache.delete(`${x},${z}`);
+        }
+      }
     }
   }
 
@@ -373,16 +397,11 @@ export class VoxelWorld {
         if (s > maxY) maxY = s;
       }
     }
-    // Also check edits that might be above surface
-    for (const [key] of this.edits) {
-      const parts = key.split(",");
-      const ex = Number(parts[0]);
-      const ey = Number(parts[1]);
-      const ez = Number(parts[2]);
-      if (ex >= startX - 1 && ex <= startX + CHUNK_SIZE &&
-          ez >= startZ - 1 && ez <= startZ + CHUNK_SIZE &&
-          ey > maxY) {
-        maxY = ey;
+    // Check cached per-chunk edit maxY (check this + neighbor chunks)
+    for (let dcz = -1; dcz <= 1; dcz++) {
+      for (let dcx = -1; dcx <= 1; dcx++) {
+        const editY = this.editMaxY.get(chunkKey(cx + dcx, cz + dcz)) ?? 0;
+        if (editY > maxY) maxY = editY;
       }
     }
     maxY = Math.min(maxY + 1, WORLD_HEIGHT);
@@ -448,7 +467,10 @@ export class VoxelWorld {
     return BlockId.Stone;
   }
 
-  private surfaceHeight(x: number, z: number) {
+  surfaceHeight(x: number, z: number) {
+    const key = `${x},${z}`;
+    const cached = this.surfaceCache.get(key);
+    if (cached !== undefined) return cached;
     const continental = fbm2D(x * 0.003, z * 0.003, 4, 2) * 18;
     const hills = fbm2D(x * 0.012, z * 0.012, 3, 11) * 7;
     const detail = fbm2D(x * 0.04, z * 0.04, 2, 37) * 2;
@@ -457,7 +479,9 @@ export class VoxelWorld {
     const dist = Math.sqrt(x * x + z * z);
     const spawnBlend = Math.max(0, 1 - dist / 18);
     const flattened = lerp(raw, baseHeight, spawnBlend);
-    return Math.max(6, Math.min(WORLD_HEIGHT - 8, Math.floor(flattened)));
+    const result = Math.max(6, Math.min(WORLD_HEIGHT - 8, Math.floor(flattened)));
+    this.surfaceCache.set(key, result);
+    return result;
   }
 
   private canSpawnAt(position: THREE.Vector3) {
