@@ -47,6 +47,9 @@ interface RemoteAvatar {
   lastVisualPosition: THREE.Vector3;
   walkPhase: number;
   bubbleExpiresAt: number;
+  dead: boolean;
+  deathTime: number;
+  soul: THREE.Group | null;
 }
 
 interface TitleScreenUi {
@@ -77,6 +80,9 @@ const ARROW_SPEED = 48;
 const ARROW_MAX_DISTANCE = CHUNK_SIZE * (RENDER_DISTANCE + 2);
 const ARROW_GRAVITY = 14;
 const MAX_STUCK_ARROWS = 20;
+const MAX_HP = 100;
+const RESPAWN_COUNTDOWN = 5;
+const ARROW_HIT_RADIUS = 0.8;
 const BODY_WIDTH = PLAYER_RADIUS * 2;
 const BODY_HEIGHT = PLAYER_HEIGHT;
 const BODY_RADIUS = PLAYER_RADIUS;
@@ -99,6 +105,7 @@ interface FlyingArrow {
   velocity: THREE.Vector3;
   origin: THREE.Vector3;
   alive: boolean;
+  shooterId: string;
 }
 
 const flyingArrows: FlyingArrow[] = [];
@@ -175,6 +182,9 @@ const player = {
   velocity: new THREE.Vector3(),
   onGround: false,
   lastSafePosition: new THREE.Vector3(),
+  hp: MAX_HP,
+  dead: false,
+  deathCountdown: 0,
 };
 player.lastSafePosition.copy(player.position);
 
@@ -226,8 +236,10 @@ let pointerLocked = false;
 
 const hud = createHud();
 document.body.appendChild(hud.root);
+document.body.appendChild(hud.deathOverlay);
 renderHotbar();
 setHeldItem(hotbarItems[selectedSlot]);
+updateHpBar();
 
 const title: TitleScreenUi = createTitleScreen();
 document.body.appendChild(title.overlay);
@@ -254,9 +266,11 @@ function animate() {
   }
   if (physicsSteps === MAX_PHYSICS_STEPS) physicsAccumulator = 0;
 
+  updateDeathState(frameDt);
   updateHeldItem(frameDt);
   updateArrows(frameDt);
   updateRemotePlayers(frameDt);
+  updateRemoteDeathAnimations(frameDt);
   updateCamera();
   updateDebugColliders();
   updateHud();
@@ -265,6 +279,8 @@ function animate() {
 }
 
 function updatePlayer(dt: number) {
+  if (player.dead) return;
+
   if (player.position.y < SAFE_FALL_RESET_Y) {
     respawnPlayer();
     return;
@@ -668,7 +684,7 @@ function wireInput() {
   }, { passive: true });
 
   window.addEventListener("mousedown", (event) => {
-    if (!pointerLocked) return;
+    if (!pointerLocked || player.dead) return;
     if (event.button === 0) {
       const selected = hotbarItems[selectedSlot];
       if (selected.id === "bow") {
@@ -839,11 +855,24 @@ function createArrowMesh() {
 }
 
 function shootArrow() {
+  if (player.dead) return;
   const origin = new THREE.Vector3();
   camera.getWorldPosition(origin);
   const direction = new THREE.Vector3();
   camera.getWorldDirection(direction);
 
+  spawnArrow(origin, direction, networkState.myId);
+
+  if (networkState.connected && networkState.ws && networkState.ws.readyState === WebSocket.OPEN) {
+    networkState.ws.send(JSON.stringify({
+      type: "shoot_arrow",
+      ox: origin.x, oy: origin.y, oz: origin.z,
+      dx: direction.x, dy: direction.y, dz: direction.z,
+    }));
+  }
+}
+
+function spawnArrow(origin: THREE.Vector3, direction: THREE.Vector3, shooterId: string) {
   const mesh = createArrowMesh();
   mesh.position.copy(origin).addScaledVector(direction, 0.8);
   mesh.lookAt(mesh.position.clone().add(direction));
@@ -854,6 +883,7 @@ function shootArrow() {
     velocity: direction.clone().multiplyScalar(ARROW_SPEED),
     origin: origin.clone(),
     alive: true,
+    shooterId,
   });
 }
 
@@ -876,7 +906,6 @@ function updateArrows(dt: number) {
       moveDir.divideScalar(moveLen);
       const hit = world.raycast(prevPos, moveDir, moveLen + 0.15);
       if (hit) {
-        // Stick into the block surface
         arrow.mesh.position.copy(prevPos).addScaledVector(moveDir, hit.distance - 0.05);
         arrow.mesh.lookAt(arrow.mesh.position.clone().add(arrow.velocity));
         stickArrow(arrow);
@@ -886,6 +915,34 @@ function updateArrows(dt: number) {
 
     arrow.mesh.position.copy(nextPos);
     arrow.mesh.lookAt(nextPos.clone().add(arrow.velocity));
+
+    // Check hit against local player (arrows from others)
+    if (arrow.shooterId !== networkState.myId && !player.dead) {
+      const dx = nextPos.x - player.position.x;
+      const dz = nextPos.z - player.position.z;
+      const dy = nextPos.y - (player.position.y + PLAYER_HEIGHT * 0.5);
+      if (dx * dx + dz * dz < ARROW_HIT_RADIUS * ARROW_HIT_RADIUS && Math.abs(dy) < PLAYER_HEIGHT * 0.6) {
+        sendHitPlayer(networkState.myId, arrow.shooterId);
+        stickArrow(arrow);
+        continue;
+      }
+    }
+
+    // Check hit against remote players (arrows from local player)
+    if (arrow.shooterId === networkState.myId) {
+      for (const avatar of remotePlayers.values()) {
+        if (avatar.dead) continue;
+        const ax = nextPos.x - avatar.root.position.x;
+        const az = nextPos.z - avatar.root.position.z;
+        const ay = nextPos.y - (avatar.root.position.y + PLAYER_HEIGHT * 0.5);
+        if (ax * ax + az * az < ARROW_HIT_RADIUS * ARROW_HIT_RADIUS && Math.abs(ay) < PLAYER_HEIGHT * 0.6) {
+          sendHitPlayer(avatar.id, arrow.shooterId);
+          stickArrow(arrow);
+          break;
+        }
+      }
+      if (!arrow.alive) continue;
+    }
 
     // Remove if too far
     if (prevPos.distanceTo(arrow.origin) > ARROW_MAX_DISTANCE) {
@@ -901,6 +958,11 @@ function updateArrows(dt: number) {
   }
 }
 
+function sendHitPlayer(targetId: string, _attackerId: string) {
+  if (!networkState.connected || !networkState.ws || networkState.ws.readyState !== WebSocket.OPEN) return;
+  networkState.ws.send(JSON.stringify({ type: "hit_player", targetId }));
+}
+
 function stickArrow(arrow: FlyingArrow) {
   arrow.alive = false;
   stuckArrows.push(arrow.mesh);
@@ -910,6 +972,41 @@ function stickArrow(arrow: FlyingArrow) {
     arrowsLayer.remove(old);
     disposeObject3D(old);
   }
+}
+
+function updateHpBar() {
+  const pct = Math.max(0, Math.min(100, player.hp));
+  hud.hpFill.style.width = `${pct}%`;
+  hud.hpFill.style.background = pct > 50 ? "#4ae64a" : pct > 25 ? "#e6c040" : "#e64040";
+  hud.hpText.textContent = `HP ${pct}/${MAX_HP}`;
+}
+
+function updateDeathState(dt: number) {
+  if (!player.dead) return;
+  player.deathCountdown -= dt;
+  const remaining = Math.max(0, Math.ceil(player.deathCountdown));
+  hud.deathTimer.textContent = `Воскрешение через ${remaining}...`;
+}
+
+function localPlayerDie() {
+  player.dead = true;
+  player.deathCountdown = RESPAWN_COUNTDOWN;
+  player.velocity.set(0, 0, 0);
+  hud.deathOverlay.style.display = "flex";
+  renderer.domElement.style.filter = "grayscale(1) brightness(0.5)";
+}
+
+function localPlayerRespawn(x: number, y: number, z: number) {
+  player.dead = false;
+  player.hp = MAX_HP;
+  player.position.set(x, y, z);
+  player.lastSafePosition.set(x, y, z);
+  player.velocity.set(0, 0, 0);
+  player.onGround = hasGroundContact(player.position);
+  physicsAccumulator = 0;
+  hud.deathOverlay.style.display = "none";
+  renderer.domElement.style.filter = "";
+  updateHpBar();
 }
 
 function createHud() {
@@ -960,10 +1057,28 @@ function createHud() {
   ].join(";");
   chatWrap.appendChild(chatInput);
 
-  info.append(coords, chunk, status);
-  root.append(crosshair, info, hint, hotbar, chatWrap);
+  const hpBar = document.createElement("div");
+  hpBar.style.cssText = "position:absolute;bottom:52px;left:50%;transform:translateX(-50%);width:220px;height:8px;background:rgba(0,0,0,0.5);border-radius:4px;overflow:hidden";
+  const hpFill = document.createElement("div");
+  hpFill.style.cssText = "width:100%;height:100%;background:#e64040;border-radius:4px;transition:width 0.2s";
+  hpBar.appendChild(hpFill);
 
-  return { root, coords, chunk, status, hint, hotbar, chatWrap, chatInput };
+  const hpText = document.createElement("div");
+  hpText.style.cssText = "position:absolute;bottom:62px;left:50%;transform:translateX(-50%);font-size:11px;color:#ff8888;text-shadow:0 1px 3px rgba(0,0,0,0.8)";
+
+  const deathOverlay = document.createElement("div");
+  deathOverlay.style.cssText = "position:fixed;inset:0;display:none;z-index:100;background:rgba(0,0,0,0.6);display:none;align-items:center;justify-content:center;flex-direction:column;gap:20px";
+  const deathTitle = document.createElement("div");
+  deathTitle.style.cssText = "font-size:48px;font-weight:bold;color:#e64040;font-family:monospace;text-shadow:0 4px 20px rgba(230,64,64,0.5)";
+  deathTitle.textContent = "ВЫ ПОГИБЛИ";
+  const deathTimer = document.createElement("div");
+  deathTimer.style.cssText = "font-size:22px;color:#ccc;font-family:monospace";
+  deathOverlay.append(deathTitle, deathTimer);
+
+  info.append(coords, chunk, status);
+  root.append(crosshair, info, hint, hotbar, chatWrap, hpBar, hpText);
+
+  return { root, coords, chunk, status, hint, hotbar, chatWrap, chatInput, hpFill, hpText, deathOverlay, deathTimer };
 }
 
 function renderHotbar() {
@@ -1372,7 +1487,52 @@ function handleServerMessage(message: ServerMessage) {
         showRemotePlayerChat(message.id, message.text);
       }
       break;
+    case "shoot_arrow": {
+      const dir = new THREE.Vector3(message.dx, message.dy, message.dz).normalize();
+      const orig = new THREE.Vector3(message.ox, message.oy, message.oz);
+      spawnArrow(orig, dir, message.id);
+      break;
+    }
+    case "damage":
+      if (message.targetId === networkState.myId) {
+        player.hp = message.hp;
+        updateHpBar();
+        renderer.domElement.style.filter = "brightness(2)";
+        setTimeout(() => { if (!player.dead) renderer.domElement.style.filter = ""; }, 120);
+      }
+      break;
+    case "death": {
+      if (message.targetId === networkState.myId) {
+        localPlayerDie();
+      }
+      const deadAvatar = remotePlayers.get(message.targetId);
+      if (deadAvatar) {
+        startRemoteDeathAnimation(deadAvatar);
+      }
+      const killerName = message.killerId === networkState.myId ? "You" : getRemotePlayerName(message.killerId);
+      const victimName = message.targetId === networkState.myId ? "You" : getRemotePlayerName(message.targetId);
+      gameLog.system(`${killerName} killed ${victimName}`);
+      break;
+    }
+    case "respawn":
+      if (message.targetId === networkState.myId) {
+        localPlayerRespawn(message.x, message.y, message.z);
+      } else {
+        const avatar = remotePlayers.get(message.targetId);
+        if (avatar) {
+          endRemoteDeathAnimation(avatar);
+          avatar.targetPosition.set(message.x, message.y, message.z);
+          avatar.root.position.set(message.x, message.y, message.z);
+          avatar.lastVisualPosition.set(message.x, message.y, message.z);
+        }
+      }
+      break;
   }
+}
+
+function getRemotePlayerName(id: string) {
+  const avatar = remotePlayers.get(id);
+  return avatar ? avatar.name : "Player";
 }
 
 function sendLocalPlayerState(_force: boolean) {
@@ -1407,6 +1567,7 @@ function updateRemotePlayers(dt: number) {
   const limbBlend = 1 - Math.exp(-18 * dt);
   const now = performance.now();
   for (const avatar of remotePlayers.values()) {
+    if (avatar.dead) continue;
     avatar.root.position.lerp(avatar.targetPosition, blend);
     avatar.root.rotation.y = lerpAngle(avatar.root.rotation.y, avatar.targetYaw, blend);
     avatar.headPitch.rotation.x = lerpAngle(avatar.headPitch.rotation.x, avatar.targetPitch, blend);
@@ -1435,6 +1596,74 @@ function updateRemotePlayers(dt: number) {
     if (avatar.bubble.visible && avatar.bubbleExpiresAt > 0 && now >= avatar.bubbleExpiresAt) {
       avatar.bubble.visible = false;
       avatar.bubbleExpiresAt = 0;
+    }
+  }
+}
+
+function startRemoteDeathAnimation(avatar: RemoteAvatar) {
+  avatar.dead = true;
+  avatar.deathTime = 0;
+
+  // Create soul (clone of root, semi-transparent)
+  const soul = avatar.root.clone(true);
+  soul.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const mat = (mesh.material as THREE.Material).clone();
+    if (mat instanceof THREE.MeshLambertMaterial || mat instanceof THREE.MeshBasicMaterial) {
+      mat.transparent = true;
+      mat.opacity = 0.35;
+    }
+    mesh.material = mat;
+  });
+  // Remove label and bubble sprites from soul
+  const toRemove: THREE.Object3D[] = [];
+  soul.traverse((child) => { if (child instanceof THREE.Sprite) toRemove.push(child); });
+  toRemove.forEach((s) => s.removeFromParent());
+
+  soul.position.copy(avatar.root.position);
+  soul.rotation.copy(avatar.root.rotation);
+  remotePlayersLayer.add(soul);
+  avatar.soul = soul;
+}
+
+function endRemoteDeathAnimation(avatar: RemoteAvatar) {
+  avatar.dead = false;
+  avatar.deathTime = 0;
+  avatar.root.rotation.x = 0;
+  avatar.root.visible = true;
+  if (avatar.soul) {
+    remotePlayersLayer.remove(avatar.soul);
+    disposeObject3D(avatar.soul);
+    avatar.soul = null;
+  }
+}
+
+function updateRemoteDeathAnimations(dt: number) {
+  for (const avatar of remotePlayers.values()) {
+    if (!avatar.dead) continue;
+    avatar.deathTime += dt;
+
+    // Body falls to horizontal
+    const fallProgress = Math.min(1, avatar.deathTime / 0.6);
+    avatar.root.rotation.x = fallProgress * (Math.PI / 2);
+
+    // Soul rises and fades
+    if (avatar.soul) {
+      const soulPhase = Math.max(0, avatar.deathTime - 0.4);
+      avatar.soul.position.y = avatar.root.position.y + soulPhase * 1.2;
+      const soulOpacity = Math.max(0, 0.35 - soulPhase * 0.08);
+      avatar.soul.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const mat = mesh.material as THREE.MeshLambertMaterial | THREE.MeshBasicMaterial;
+        if (mat.opacity !== undefined) mat.opacity = soulOpacity;
+      });
+      if (soulOpacity <= 0) {
+        remotePlayersLayer.remove(avatar.soul);
+        disposeObject3D(avatar.soul);
+        avatar.soul = null;
+      }
     }
   }
 }
@@ -1583,6 +1812,9 @@ function createRemotePlayer(state: RemotePlayerState) {
     lastVisualPosition: new THREE.Vector3(state.x, state.y, state.z),
     walkPhase: Math.random() * Math.PI * 2,
     bubbleExpiresAt: 0,
+    dead: false,
+    deathTime: 0,
+    soul: null,
   };
   setRemoteHeldItem(avatar, state.heldItemId);
   return avatar;

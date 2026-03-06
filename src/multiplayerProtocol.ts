@@ -55,6 +55,17 @@ export interface ChatMessage {
   text: string;
 }
 
+export interface ShootArrowMessage {
+  type: "shoot_arrow";
+  ox: number; oy: number; oz: number;
+  dx: number; dy: number; dz: number;
+}
+
+export interface HitPlayerMessage {
+  type: "hit_player";
+  targetId: string;
+}
+
 export interface InitMessage {
   type: "init";
   id: string;
@@ -94,11 +105,39 @@ export interface ChatBroadcast {
   text: string;
 }
 
+export interface ShootArrowBroadcast {
+  type: "shoot_arrow";
+  id: string;
+  ox: number; oy: number; oz: number;
+  dx: number; dy: number; dz: number;
+}
+
+export interface DamageBroadcast {
+  type: "damage";
+  targetId: string;
+  attackerId: string;
+  hp: number;
+}
+
+export interface DeathBroadcast {
+  type: "death";
+  targetId: string;
+  killerId: string;
+}
+
+export interface RespawnBroadcast {
+  type: "respawn";
+  targetId: string;
+  x: number; y: number; z: number;
+}
+
 export type ClientMessage =
   | JoinMessage
   | PlayerStateMessage
   | SetBlockMessage
-  | ChatMessage;
+  | ChatMessage
+  | ShootArrowMessage
+  | HitPlayerMessage;
 
 export type ServerMessage =
   | InitMessage
@@ -106,4 +145,8 @@ export type ServerMessage =
   | PlayerLeaveMessage
   | SnapshotMessage
   | SetBlockBroadcast
-  | ChatBroadcast;
+  | ChatBroadcast
+  | ShootArrowBroadcast
+  | DamageBroadcast
+  | DeathBroadcast
+  | RespawnBroadcast;

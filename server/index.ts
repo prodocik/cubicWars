@@ -6,10 +6,12 @@ import {
   type BlockEditState,
   type ChatMessage,
   type ClientMessage,
+  type HitPlayerMessage,
   type JoinMessage,
   type PlayerStateMessage,
   type RemotePlayerState,
   type SetBlockMessage,
+  type ShootArrowMessage,
 } from "../src/multiplayerProtocol";
 
 const PORT = Number(process.env.PORT) || DEFAULT_SERVER_PORT;
@@ -17,6 +19,9 @@ const SNAPSHOT_INTERVAL_MS = Math.round(1000 / SERVER_TICK_RATE);
 const MAX_COORD = 1_000_000;
 const MAX_NAME_LENGTH = 24;
 const MAX_CHAT_LENGTH = 120;
+const ARROW_DAMAGE = 25;
+const MAX_HP = 100;
+const RESPAWN_DELAY_MS = 5000;
 const GRAVITY = 31;
 const MAX_FALL_SPEED = 38;
 const GROUND_CHECK = 0.08;
@@ -26,6 +31,9 @@ interface ServerPlayer extends RemotePlayerState {
   ws: WebSocket;
   velocityY: number;
   onGround: boolean;
+  hp: number;
+  dead: boolean;
+  respawnTimer: ReturnType<typeof setTimeout> | null;
 }
 
 const players = new Map<string, ServerPlayer>();
@@ -109,6 +117,16 @@ function isChatMessage(raw: unknown): raw is ChatMessage {
   return (raw as Record<string, unknown>).type === "chat";
 }
 
+function isShootArrowMessage(raw: unknown): raw is ShootArrowMessage {
+  if (!raw || typeof raw !== "object") return false;
+  return (raw as Record<string, unknown>).type === "shoot_arrow";
+}
+
+function isHitPlayerMessage(raw: unknown): raw is HitPlayerMessage {
+  if (!raw || typeof raw !== "object") return false;
+  return (raw as Record<string, unknown>).type === "hit_player";
+}
+
 function playerPublicState(player: ServerPlayer): RemotePlayerState {
   return {
     id: player.id,
@@ -153,6 +171,7 @@ function serializeBlockEdits(): BlockEditState[] {
 }
 
 function handlePlayerState(player: ServerPlayer, msg: PlayerStateMessage) {
+  if (player.dead) return;
   const previousY = player.y;
   const proposedY = sanitizeHeight(msg.y, player.y);
   const grounded = player.onGround || hasGroundContact(player);
@@ -195,6 +214,56 @@ function handleChat(player: ServerPlayer, msg: ChatMessage) {
     name: player.name,
     text,
   });
+}
+
+function handleShootArrow(player: ServerPlayer, msg: ShootArrowMessage) {
+  if (player.dead) return;
+  if (!isFiniteNumber(msg.ox) || !isFiniteNumber(msg.oy) || !isFiniteNumber(msg.oz)) return;
+  if (!isFiniteNumber(msg.dx) || !isFiniteNumber(msg.dy) || !isFiniteNumber(msg.dz)) return;
+  broadcast({
+    type: "shoot_arrow",
+    id: player.id,
+    ox: msg.ox, oy: msg.oy, oz: msg.oz,
+    dx: msg.dx, dy: msg.dy, dz: msg.dz,
+  }, player.id);
+}
+
+function handleHitPlayer(attacker: ServerPlayer, msg: HitPlayerMessage) {
+  if (attacker.dead) return;
+  const target = players.get(msg.targetId);
+  if (!target || target.dead || target.id === attacker.id) return;
+
+  target.hp = Math.max(0, target.hp - ARROW_DAMAGE);
+  broadcast({
+    type: "damage",
+    targetId: target.id,
+    attackerId: attacker.id,
+    hp: target.hp,
+  });
+
+  if (target.hp <= 0) {
+    target.dead = true;
+    broadcast({
+      type: "death",
+      targetId: target.id,
+      killerId: attacker.id,
+    });
+
+    target.respawnTimer = setTimeout(() => {
+      target.hp = MAX_HP;
+      target.dead = false;
+      target.respawnTimer = null;
+      const sy = surfaceHeight(Math.floor(target.x), Math.floor(target.z)) + 1;
+      target.y = sy;
+      target.velocityY = 0;
+      target.onGround = true;
+      broadcast({
+        type: "respawn",
+        targetId: target.id,
+        x: target.x, y: target.y, z: target.z,
+      });
+    }, RESPAWN_DELAY_MS);
+  }
 }
 
 function getBlock(x: number, y: number, z: number): BlockId {
@@ -435,6 +504,9 @@ wss.on("connection", (ws) => {
         heldItemId: join.heldItemId,
         velocityY: 0,
         onGround: false,
+        hp: MAX_HP,
+        dead: false,
+        respawnTimer: null,
       };
 
       if (bodyCollidesAt(player.x, player.y, player.z)) {
@@ -474,6 +546,16 @@ wss.on("connection", (ws) => {
 
     if (isChatMessage(message)) {
       handleChat(player, message);
+      return;
+    }
+
+    if (isShootArrowMessage(message)) {
+      handleShootArrow(player, message);
+      return;
+    }
+
+    if (isHitPlayerMessage(message)) {
+      handleHitPlayer(player, message);
     }
   });
 
@@ -481,6 +563,7 @@ wss.on("connection", (ws) => {
     const player = playersBySocket.get(ws);
     if (!player) return;
 
+    if (player.respawnTimer) clearTimeout(player.respawnTimer);
     playersBySocket.delete(ws);
     players.delete(player.id);
     broadcast({ type: "player_leave", id: player.id }, player.id);
