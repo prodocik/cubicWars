@@ -50,6 +50,11 @@ export interface SetBlockMessage {
   block: number;
 }
 
+export interface ChatMessage {
+  type: "chat";
+  text: string;
+}
+
 export interface InitMessage {
   type: "init";
   id: string;
@@ -82,14 +87,23 @@ export interface SetBlockBroadcast {
   block: number;
 }
 
+export interface ChatBroadcast {
+  type: "chat";
+  id: string;
+  name: string;
+  text: string;
+}
+
 export type ClientMessage =
   | JoinMessage
   | PlayerStateMessage
-  | SetBlockMessage;
+  | SetBlockMessage
+  | ChatMessage;
 
 export type ServerMessage =
   | InitMessage
   | PlayerJoinMessage
   | PlayerLeaveMessage
   | SnapshotMessage
-  | SetBlockBroadcast;
+  | SetBlockBroadcast
+  | ChatBroadcast;

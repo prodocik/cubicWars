@@ -4,6 +4,7 @@ import {
   DEFAULT_SERVER_PORT,
   SERVER_TICK_RATE,
   type BlockEditState,
+  type ChatMessage,
   type ClientMessage,
   type JoinMessage,
   type PlayerStateMessage,
@@ -15,6 +16,7 @@ const PORT = Number(process.env.PORT) || DEFAULT_SERVER_PORT;
 const SNAPSHOT_INTERVAL_MS = Math.round(1000 / SERVER_TICK_RATE);
 const MAX_COORD = 1_000_000;
 const MAX_NAME_LENGTH = 24;
+const MAX_CHAT_LENGTH = 120;
 const GRAVITY = 31;
 const MAX_FALL_SPEED = 38;
 const GROUND_CHECK = 0.08;
@@ -65,6 +67,11 @@ function sanitizeHeldItemId(value: unknown) {
   return value.slice(0, 32) || "block:1";
 }
 
+function sanitizeChatText(value: unknown) {
+  if (typeof value !== "string") return "";
+  return value.replace(/\s+/g, " ").trim().slice(0, MAX_CHAT_LENGTH);
+}
+
 function sanitizeAppearanceSeed(value: unknown, fallback = 1) {
   if (!isFiniteNumber(value)) return fallback;
   return Math.floor(clamp(Math.abs(value), 1, 0x7fffffff));
@@ -95,6 +102,11 @@ function isPlayerStateMessage(raw: unknown): raw is PlayerStateMessage {
 function isSetBlockMessage(raw: unknown): raw is SetBlockMessage {
   if (!raw || typeof raw !== "object") return false;
   return (raw as Record<string, unknown>).type === "set_block";
+}
+
+function isChatMessage(raw: unknown): raw is ChatMessage {
+  if (!raw || typeof raw !== "object") return false;
+  return (raw as Record<string, unknown>).type === "chat";
 }
 
 function playerPublicState(player: ServerPlayer): RemotePlayerState {
@@ -171,6 +183,18 @@ function handleSetBlock(player: ServerPlayer, msg: SetBlockMessage) {
   if (y < 0 || y >= WORLD_HEIGHT) return;
   blockEdits.set(editKey(x, y, z), block);
   broadcast({ type: "set_block", by: player.id, x, y, z, block }, player.id);
+}
+
+function handleChat(player: ServerPlayer, msg: ChatMessage) {
+  const text = sanitizeChatText(msg.text);
+  if (!text) return;
+
+  broadcast({
+    type: "chat",
+    id: player.id,
+    name: player.name,
+    text,
+  });
 }
 
 function getBlock(x: number, y: number, z: number): BlockId {
@@ -445,6 +469,11 @@ wss.on("connection", (ws) => {
 
     if (isSetBlockMessage(message)) {
       handleSetBlock(player, message);
+      return;
+    }
+
+    if (isChatMessage(message)) {
+      handleChat(player, message);
     }
   });
 

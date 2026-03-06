@@ -2,11 +2,13 @@ import * as THREE from "three";
 
 export const CHUNK_SIZE = 16;
 export const WORLD_HEIGHT = 48;
-export const RENDER_DISTANCE = 2;
+export const RENDER_DISTANCE = 4;
 export const EYE_HEIGHT = 1.62;
 export const PLAYER_WIDTH = 0.6;
 export const PLAYER_HEIGHT = 1.8;
 export const PLAYER_RADIUS = PLAYER_WIDTH / 2;
+const CHUNK_BUILD_BUDGET = 2;
+const CHUNK_FADE_IN_SPEED = 3.5;
 
 export enum BlockId {
   Air = 0,
@@ -22,6 +24,7 @@ interface ChunkEntry {
   cz: number;
   mesh: THREE.Mesh | null;
   dirty: boolean;
+  fade: number;
 }
 
 interface MeshBuffers {
@@ -108,7 +111,7 @@ export class VoxelWorld {
     this.scene.add(new THREE.AmbientLight(0xffffff, 0));
   }
 
-  update(playerX: number, playerZ: number) {
+  update(playerX: number, playerZ: number, dt = 1 / 60) {
     const chunkX = Math.floor(playerX / CHUNK_SIZE);
     const chunkZ = Math.floor(playerZ / CHUNK_SIZE);
     if (chunkX !== this.targetChunkX || chunkZ !== this.targetChunkZ) {
@@ -117,7 +120,7 @@ export class VoxelWorld {
       this.syncChunks(chunkX, chunkZ);
     }
 
-    let budget = 1;
+    let budget = CHUNK_BUILD_BUDGET;
     while (budget > 0 && this.buildQueue.length > 0) {
       const key = this.buildQueue.shift()!;
       this.queued.delete(key);
@@ -125,6 +128,13 @@ export class VoxelWorld {
       if (!chunk) continue;
       this.rebuildChunk(chunk);
       budget--;
+    }
+
+    for (const chunk of this.chunks.values()) {
+      if (!chunk.mesh || chunk.fade >= 1) continue;
+      chunk.fade = Math.min(1, chunk.fade + dt * CHUNK_FADE_IN_SPEED);
+      const material = chunk.mesh.material as THREE.MeshLambertMaterial;
+      material.opacity = chunk.fade;
     }
   }
 
@@ -261,18 +271,27 @@ export class VoxelWorld {
 
   private syncChunks(centerX: number, centerZ: number) {
     const wanted = new Set<string>();
+    const candidates: Array<{ cx: number; cz: number; distanceSq: number }> = [];
     for (let dz = -RENDER_DISTANCE; dz <= RENDER_DISTANCE; dz++) {
       for (let dx = -RENDER_DISTANCE; dx <= RENDER_DISTANCE; dx++) {
-        const cx = centerX + dx;
-        const cz = centerZ + dz;
+        candidates.push({
+          cx: centerX + dx,
+          cz: centerZ + dz,
+          distanceSq: dx * dx + dz * dz,
+        });
+      }
+    }
+    candidates.sort((a, b) => a.distanceSq - b.distanceSq);
+
+    for (const candidate of candidates) {
+      const { cx, cz } = candidate;
         const key = chunkKey(cx, cz);
         wanted.add(key);
         if (!this.chunks.has(key)) {
-          const chunk: ChunkEntry = { cx, cz, mesh: null, dirty: true };
+          const chunk: ChunkEntry = { cx, cz, mesh: null, dirty: true, fade: 0 };
           this.chunks.set(key, chunk);
           this.enqueueBuild(key);
         }
-      }
     }
 
     for (const [key, chunk] of this.chunks) {
@@ -280,6 +299,7 @@ export class VoxelWorld {
       if (chunk.mesh) {
         this.scene.remove(chunk.mesh);
         chunk.mesh.geometry.dispose();
+        (chunk.mesh.material as THREE.Material).dispose();
       }
       this.chunks.delete(key);
       this.queued.delete(key);
@@ -290,7 +310,7 @@ export class VoxelWorld {
     const key = chunkKey(cx, cz);
     let chunk = this.chunks.get(key);
     if (!chunk) {
-      chunk = { cx, cz, mesh: null, dirty: true };
+      chunk = { cx, cz, mesh: null, dirty: true, fade: 0 };
       this.chunks.set(key, chunk);
     }
     chunk.dirty = true;
@@ -311,6 +331,7 @@ export class VoxelWorld {
       if (chunk.mesh) {
         this.scene.remove(chunk.mesh);
         chunk.mesh.geometry.dispose();
+        (chunk.mesh.material as THREE.Material).dispose();
         chunk.mesh = null;
       }
       chunk.dirty = false;
@@ -318,11 +339,17 @@ export class VoxelWorld {
     }
 
     if (chunk.mesh) {
-      this.scene.remove(chunk.mesh);
       chunk.mesh.geometry.dispose();
+      chunk.mesh.geometry = geometry;
+      chunk.dirty = false;
+      return;
     }
 
-    const mesh = new THREE.Mesh(geometry, this.material);
+    const material = this.material.clone();
+    material.map = this.atlas;
+    material.transparent = true;
+    material.opacity = chunk.fade;
+    const mesh = new THREE.Mesh(geometry, material);
     mesh.position.set(chunk.cx * CHUNK_SIZE, 0, chunk.cz * CHUNK_SIZE);
     mesh.matrixAutoUpdate = true;
     chunk.mesh = mesh;

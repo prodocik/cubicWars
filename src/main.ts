@@ -39,12 +39,14 @@ interface RemoteAvatar {
   heldPivot: THREE.Group;
   heldItemMesh: THREE.Object3D | null;
   label: THREE.Sprite;
+  bubble: THREE.Sprite;
   targetPosition: THREE.Vector3;
   targetYaw: number;
   targetPitch: number;
   heldItemId: string;
   lastVisualPosition: THREE.Vector3;
   walkPhase: number;
+  bubbleExpiresAt: number;
 }
 
 interface TitleScreenUi {
@@ -69,6 +71,8 @@ const GROUND_CHECK = 0.05;
 const SAFE_FALL_RESET_Y = -16;
 const SWEEP_EPSILON = 1e-4;
 const REMOTE_SMOOTHING = 14;
+const CHAT_BUBBLE_DURATION_MS = 7000;
+const MAX_CHAT_LENGTH = 120;
 const BODY_WIDTH = PLAYER_RADIUS * 2;
 const BODY_HEIGHT = PLAYER_HEIGHT;
 const BODY_RADIUS = PLAYER_RADIUS;
@@ -182,6 +186,10 @@ const networkState = {
   reconnectTimer: 0 as number,
   pageActive: document.visibilityState === "visible" && document.hasFocus(),
   lastError: "",
+};
+const chatState = {
+  open: false,
+  restorePointerLock: false,
 };
 
 const hotbarItems: HotbarItem[] = [
@@ -418,6 +426,44 @@ function updateHeldItem(dt: number) {
   heldItemPivot.rotation.set(-0.25 - swing * 0.6, 0.55 + swing * 0.45, 0.12 + swing * 0.25);
 }
 
+function openChatInput() {
+  if (chatState.open || !networkState.started) return;
+  chatState.open = true;
+  chatState.restorePointerLock = pointerLocked;
+  if (pointerLocked) {
+    document.exitPointerLock();
+  }
+  hud.chatWrap.style.display = "block";
+  hud.chatInput.value = "";
+  window.setTimeout(() => {
+    hud.chatInput.focus();
+    hud.chatInput.select();
+  }, 0);
+  updateTitleScreen();
+}
+
+function closeChatInput(restorePointerLock = chatState.restorePointerLock) {
+  chatState.open = false;
+  chatState.restorePointerLock = false;
+  hud.chatWrap.style.display = "none";
+  hud.chatInput.blur();
+  hud.chatInput.value = "";
+  updateTitleScreen();
+  if (restorePointerLock && networkState.started) {
+    renderer.domElement.requestPointerLock();
+  }
+}
+
+function sendChatMessage(text: string) {
+  const trimmed = text.replace(/\s+/g, " ").trim().slice(0, MAX_CHAT_LENGTH);
+  if (!trimmed) return;
+  if (!networkState.connected || !networkState.ws || networkState.ws.readyState !== WebSocket.OPEN) {
+    gameLog.warn("Chat unavailable while offline.");
+    return;
+  }
+  networkState.ws.send(JSON.stringify({ type: "chat", text: trimmed }));
+}
+
 function isTypingInUi(target: EventTarget | null) {
   const element = target instanceof Element ? target : document.activeElement;
   if (!(element instanceof HTMLElement)) return false;
@@ -425,6 +471,21 @@ function isTypingInUi(target: EventTarget | null) {
 }
 
 function wireInput() {
+  hud.chatInput.addEventListener("keydown", (event) => {
+    if (event.code === "Enter") {
+      event.preventDefault();
+      const text = hud.chatInput.value;
+      closeChatInput(true);
+      sendChatMessage(text);
+      return;
+    }
+
+    if (event.code === "Escape") {
+      event.preventDefault();
+      closeChatInput(true);
+    }
+  });
+
   renderer.domElement.addEventListener("click", () => {
     renderer.domElement.focus();
     if (!pointerLocked) renderer.domElement.requestPointerLock();
@@ -494,6 +555,13 @@ function wireInput() {
         if (pointerLocked) input.jumpQueued = true;
         if (pointerLocked) event.preventDefault();
         break;
+      case "Enter":
+      case "NumpadEnter":
+        if (pointerLocked) {
+          openChatInput();
+          event.preventDefault();
+        }
+        break;
       case "Digit1":
         if (pointerLocked) selectSlot(0);
         break;
@@ -526,7 +594,11 @@ function wireInput() {
         event.preventDefault();
         break;
       case "Escape":
-        document.exitPointerLock();
+        if (chatState.open) {
+          closeChatInput(false);
+        } else {
+          document.exitPointerLock();
+        }
         break;
     }
   });
@@ -735,15 +807,36 @@ function createHud() {
 
   const hint = document.createElement("div");
   hint.style.cssText = "position:absolute;left:50%;bottom:88px;transform:translateX(-50%);padding:6px 10px;border-radius:10px;background:rgba(0,0,0,0.38);font-size:12px;color:#deedde";
-  hint.textContent = "WASD move, Space jump, LMB break, RMB place, wheel or 1-9 select";
+  hint.textContent = "WASD move, Space jump, Enter chat, LMB break, RMB place, wheel or 1-9 select";
 
   const hotbar = document.createElement("div");
   hotbar.style.cssText = "position:absolute;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:6px;pointer-events:none";
 
-  info.append(coords, chunk, status);
-  root.append(crosshair, info, hint, hotbar);
+  const chatWrap = document.createElement("div");
+  chatWrap.style.cssText = "position:absolute;left:50%;bottom:150px;transform:translateX(-50%);display:none;pointer-events:auto";
 
-  return { root, coords, chunk, status, hint, hotbar };
+  const chatInput = document.createElement("input");
+  chatInput.type = "text";
+  chatInput.maxLength = MAX_CHAT_LENGTH;
+  chatInput.placeholder = "Chat...";
+  chatInput.autocomplete = "off";
+  chatInput.style.cssText = [
+    "width:min(70vw,420px)",
+    "padding:10px 14px",
+    "border-radius:12px",
+    "border:1px solid rgba(255,255,255,0.18)",
+    "background:rgba(10,14,18,0.92)",
+    "box-shadow:0 10px 30px rgba(0,0,0,0.35)",
+    "color:#fff",
+    "font:14px monospace",
+    "outline:none"
+  ].join(";");
+  chatWrap.appendChild(chatInput);
+
+  info.append(coords, chunk, status);
+  root.append(crosshair, info, hint, hotbar, chatWrap);
+
+  return { root, coords, chunk, status, hint, hotbar, chatWrap, chatInput };
 }
 
 function renderHotbar() {
@@ -882,6 +975,11 @@ function updateDebugColliders() {
 }
 
 function updateTitleScreen() {
+  if (chatState.open) {
+    title.overlay.style.display = "none";
+    return;
+  }
+
   if (pointerLocked) {
     title.overlay.style.display = "none";
     return;
@@ -1138,6 +1236,12 @@ function handleServerMessage(message: ServerMessage) {
     case "set_block":
       world.setBlock(message.x, message.y, message.z, message.block as BlockId);
       break;
+    case "chat":
+      gameLog.chat(message.name, message.text);
+      if (message.id !== networkState.myId) {
+        showRemotePlayerChat(message.id, message.text);
+      }
+      break;
   }
 }
 
@@ -1160,9 +1264,18 @@ function sendBlockUpdate(x: number, y: number, z: number, block: BlockId) {
   networkState.ws.send(JSON.stringify({ type: "set_block", x, y, z, block }));
 }
 
+function showRemotePlayerChat(id: string, text: string) {
+  const avatar = remotePlayers.get(id);
+  if (!avatar) return;
+  setBubbleText(avatar.bubble, text);
+  avatar.bubble.visible = true;
+  avatar.bubbleExpiresAt = performance.now() + CHAT_BUBBLE_DURATION_MS;
+}
+
 function updateRemotePlayers(dt: number) {
   const blend = 1 - Math.exp(-REMOTE_SMOOTHING * dt);
   const limbBlend = 1 - Math.exp(-18 * dt);
+  const now = performance.now();
   for (const avatar of remotePlayers.values()) {
     avatar.root.position.lerp(avatar.targetPosition, blend);
     avatar.root.rotation.y = lerpAngle(avatar.root.rotation.y, avatar.targetYaw, blend);
@@ -1188,6 +1301,11 @@ function updateRemotePlayers(dt: number) {
     avatar.rightArm.rotation.x = settle(avatar.rightArm.rotation.x, armSwing - 0.26);
     avatar.leftArm.rotation.z = settle(avatar.leftArm.rotation.z, -0.04);
     avatar.rightArm.rotation.z = settle(avatar.rightArm.rotation.z, 0.08);
+
+    if (avatar.bubble.visible && avatar.bubbleExpiresAt > 0 && now >= avatar.bubbleExpiresAt) {
+      avatar.bubble.visible = false;
+      avatar.bubbleExpiresAt = 0;
+    }
   }
 }
 
@@ -1207,7 +1325,7 @@ function upsertRemotePlayer(state: RemotePlayerState, snapNow: boolean) {
   avatar.appearanceSeed = state.appearanceSeed;
   avatar.targetPosition.set(state.x, state.y, state.z);
   avatar.targetYaw = state.yaw + Math.PI;
-  avatar.targetPitch = state.pitch;
+  avatar.targetPitch = -state.pitch;
 
   if (avatar.heldItemId !== state.heldItemId) {
     setRemoteHeldItem(avatar, state.heldItemId);
@@ -1305,11 +1423,13 @@ function createRemotePlayer(state: RemotePlayerState) {
 
   const label = createNameSprite(state.name);
   label.position.set(0, 2.22, 0);
+  const bubble = createBubbleSprite();
+  bubble.position.set(0, 2.78, 0);
 
-  root.add(torso, shirtStripe, shirtHem, collar, leftLeg, rightLeg, leftArm, rightArm, headPitch, label);
+  root.add(torso, shirtStripe, shirtHem, collar, leftLeg, rightLeg, leftArm, rightArm, headPitch, label, bubble);
   root.position.set(state.x, state.y, state.z);
   root.rotation.y = state.yaw + Math.PI;
-  headPitch.rotation.x = state.pitch;
+  headPitch.rotation.x = -state.pitch;
   remotePlayersLayer.add(root);
 
   const avatar: RemoteAvatar = {
@@ -1325,12 +1445,14 @@ function createRemotePlayer(state: RemotePlayerState) {
     heldPivot,
     heldItemMesh: null,
     label,
+    bubble,
     targetPosition: new THREE.Vector3(state.x, state.y, state.z),
     targetYaw: state.yaw + Math.PI,
-    targetPitch: state.pitch,
+    targetPitch: -state.pitch,
     heldItemId: "",
     lastVisualPosition: new THREE.Vector3(state.x, state.y, state.z),
     walkPhase: Math.random() * Math.PI * 2,
+    bubbleExpiresAt: 0,
   };
   setRemoteHeldItem(avatar, state.heldItemId);
   return avatar;
@@ -1373,6 +1495,20 @@ function clearRemotePlayers() {
   }
 }
 
+function createSpriteWithMaterial() {
+  return new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthWrite: false }));
+}
+
+function applyCanvasToSprite(sprite: THREE.Sprite, canvas: HTMLCanvasElement, scaleX: number, scaleY: number) {
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const material = sprite.material as THREE.SpriteMaterial;
+  material.map?.dispose();
+  material.map = texture;
+  material.needsUpdate = true;
+  sprite.scale.set(scaleX, scaleY, 1);
+}
+
 function createNameSprite(name: string) {
   const canvas = document.createElement("canvas");
   canvas.width = 256;
@@ -1386,12 +1522,92 @@ function createNameSprite(name: string) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(name, canvas.width / 2, canvas.height / 2 + 1);
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false });
-  const sprite = new THREE.Sprite(material);
-  sprite.scale.set(1.8, 0.45, 1);
+  const sprite = createSpriteWithMaterial();
+  applyCanvasToSprite(sprite, canvas, 1.8, 0.45);
   return sprite;
+}
+
+function createBubbleSprite() {
+  const sprite = createSpriteWithMaterial();
+  sprite.visible = false;
+  return sprite;
+}
+
+function setBubbleText(sprite: THREE.Sprite, text: string) {
+  const lines = wrapChatText(text, 22, 3);
+  const canvas = document.createElement("canvas");
+  canvas.width = 320;
+  canvas.height = 42 + lines.length * 28;
+  const ctx = canvas.getContext("2d")!;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = "rgba(255, 255, 255, 0.96)";
+  roundRect(ctx, 12, 10, canvas.width - 24, canvas.height - 20, 16);
+  ctx.fill();
+  ctx.fillStyle = "rgba(18, 24, 30, 0.94)";
+  roundRect(ctx, 16, 14, canvas.width - 32, canvas.height - 28, 12);
+  ctx.fill();
+
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 20px monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], canvas.width / 2, 32 + i * 26);
+  }
+
+  const aspect = canvas.width / canvas.height;
+  applyCanvasToSprite(sprite, canvas, 1.5 * aspect, 1.5);
+}
+
+function wrapChatText(text: string, maxChars: number, maxLines: number) {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let current = "";
+
+  for (const word of words) {
+    const chunks = word.length > maxChars ? word.match(new RegExp(`.{1,${maxChars}}`, "g")) || [word] : [word];
+    for (const chunk of chunks) {
+      const next = current ? `${current} ${chunk}` : chunk;
+      if (next.length <= maxChars) {
+        current = next;
+        continue;
+      }
+      if (current) lines.push(current);
+      current = chunk;
+      if (lines.length >= maxLines - 1) break;
+    }
+    if (lines.length >= maxLines - 1) break;
+  }
+
+  if (current && lines.length < maxLines) {
+    lines.push(current);
+  }
+
+  if (lines.length === 0) {
+    lines.push(text.slice(0, maxChars));
+  }
+
+  if (lines.length > maxLines) {
+    lines.length = maxLines;
+  }
+
+  const lastIndex = lines.length - 1;
+  if (lastIndex >= 0 && text.length > lines.join(" ").length) {
+    lines[lastIndex] = lines[lastIndex].slice(0, Math.max(0, maxChars - 1)) + "…";
+  }
+
+  return lines;
+}
+
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + width, y, x + width, y + height, radius);
+  ctx.arcTo(x + width, y + height, x, y + height, radius);
+  ctx.arcTo(x, y + height, x, y, radius);
+  ctx.arcTo(x, y, x + width, y, radius);
+  ctx.closePath();
 }
 
 function disposeObject3D(object: THREE.Object3D) {
