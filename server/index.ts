@@ -1,4 +1,5 @@
 import { WebSocketServer, WebSocket } from "ws";
+import Database from "better-sqlite3";
 import { BlockId, PLAYER_HEIGHT, PLAYER_RADIUS, WORLD_HEIGHT } from "../src/voxelWorld";
 import {
   DEFAULT_SERVER_PORT,
@@ -40,6 +41,31 @@ const players = new Map<string, ServerPlayer>();
 const playersBySocket = new Map<WebSocket, ServerPlayer>();
 const blockEdits = new Map<string, number>();
 let nextPlayerId = 1;
+
+// --- SQLite persistence ---
+const DB_PATH = process.env.DB_PATH || "world.db";
+const db = new Database(DB_PATH);
+db.pragma("journal_mode = WAL");
+db.exec(`
+  CREATE TABLE IF NOT EXISTS block_edits (
+    x INTEGER NOT NULL,
+    y INTEGER NOT NULL,
+    z INTEGER NOT NULL,
+    block INTEGER NOT NULL,
+    PRIMARY KEY (x, y, z)
+  )
+`);
+
+const stmtUpsert = db.prepare(
+  "INSERT INTO block_edits (x, y, z, block) VALUES (?, ?, ?, ?) ON CONFLICT(x, y, z) DO UPDATE SET block = excluded.block"
+);
+const stmtDelete = db.prepare("DELETE FROM block_edits WHERE x = ? AND y = ? AND z = ?");
+
+// Load existing edits into memory
+for (const row of db.prepare("SELECT x, y, z, block FROM block_edits").iterate() as Iterable<{ x: number; y: number; z: number; block: number }>) {
+  blockEdits.set(editKey(row.x, row.y, row.z), row.block);
+}
+console.log(`Loaded ${blockEdits.size} block edits from ${DB_PATH}`);
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -202,7 +228,19 @@ function handleSetBlock(player: ServerPlayer, msg: SetBlockMessage) {
   if (y < 0 || y >= WORLD_HEIGHT) return;
   if (getBlock(x, y, z) === BlockId.Bedrock && block === BlockId.Air) return;
   blockEdits.set(editKey(x, y, z), block);
+  persistBlockEdit(x, y, z, block);
   broadcast({ type: "set_block", by: player.id, x, y, z, block }, player.id);
+}
+
+function persistBlockEdit(x: number, y: number, z: number, block: number) {
+  // If setting back to the generated block, remove the edit to save space
+  const generated = sampleGeneratedBlock(x, y, z);
+  if (block === generated) {
+    blockEdits.delete(editKey(x, y, z));
+    stmtDelete.run(x, y, z);
+  } else {
+    stmtUpsert.run(x, y, z, block);
+  }
 }
 
 function handleChat(player: ServerPlayer, msg: ChatMessage) {
