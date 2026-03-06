@@ -416,6 +416,12 @@ function updateHeldItem(dt: number) {
   heldItemPivot.rotation.set(-0.25 - swing * 0.6, 0.55 + swing * 0.45, 0.12 + swing * 0.25);
 }
 
+function isTypingInUi(target: EventTarget | null) {
+  const element = target instanceof Element ? target : document.activeElement;
+  if (!(element instanceof HTMLElement)) return false;
+  return Boolean(element.closest("input, textarea, select, [contenteditable='true']"));
+}
+
 function wireInput() {
   renderer.domElement.addEventListener("click", () => {
     renderer.domElement.focus();
@@ -450,44 +456,69 @@ function wireInput() {
   });
 
   window.addEventListener("keydown", (event) => {
+    if (isTypingInUi(event.target)) return;
+
     switch (event.code) {
       case "KeyW":
       case "ArrowUp":
+        if (!pointerLocked) break;
         input.forward = true;
         event.preventDefault();
         break;
       case "KeyS":
       case "ArrowDown":
+        if (!pointerLocked) break;
         input.back = true;
         event.preventDefault();
         break;
       case "KeyA":
       case "ArrowLeft":
+        if (!pointerLocked) break;
         input.left = true;
         event.preventDefault();
         break;
       case "KeyD":
       case "ArrowRight":
+        if (!pointerLocked) break;
         input.right = true;
         event.preventDefault();
         break;
       case "ShiftLeft":
       case "ShiftRight":
+        if (!pointerLocked) break;
         input.sprint = true;
         break;
       case "Space":
         if (pointerLocked) input.jumpQueued = true;
-        event.preventDefault();
+        if (pointerLocked) event.preventDefault();
         break;
-      case "Digit1": selectSlot(0); break;
-      case "Digit2": selectSlot(1); break;
-      case "Digit3": selectSlot(2); break;
-      case "Digit4": selectSlot(3); break;
-      case "Digit5": selectSlot(4); break;
-      case "Digit6": selectSlot(5); break;
-      case "Digit7": selectSlot(6); break;
-      case "Digit8": selectSlot(7); break;
-      case "Digit9": selectSlot(8); break;
+      case "Digit1":
+        if (pointerLocked) selectSlot(0);
+        break;
+      case "Digit2":
+        if (pointerLocked) selectSlot(1);
+        break;
+      case "Digit3":
+        if (pointerLocked) selectSlot(2);
+        break;
+      case "Digit4":
+        if (pointerLocked) selectSlot(3);
+        break;
+      case "Digit5":
+        if (pointerLocked) selectSlot(4);
+        break;
+      case "Digit6":
+        if (pointerLocked) selectSlot(5);
+        break;
+      case "Digit7":
+        if (pointerLocked) selectSlot(6);
+        break;
+      case "Digit8":
+        if (pointerLocked) selectSlot(7);
+        break;
+      case "Digit9":
+        if (pointerLocked) selectSlot(8);
+        break;
       case "F3":
         toggleDebugColliders();
         event.preventDefault();
@@ -499,6 +530,8 @@ function wireInput() {
   });
 
   window.addEventListener("keyup", (event) => {
+    if (isTypingInUi(event.target)) return;
+
     switch (event.code) {
       case "KeyW":
       case "ArrowUp":
@@ -524,6 +557,7 @@ function wireInput() {
   });
 
   window.addEventListener("wheel", (event) => {
+    if (!pointerLocked || isTypingInUi(event.target)) return;
     const direction = event.deltaY > 0 ? 1 : -1;
     const next = (selectedSlot + direction + hotbarItems.length) % hotbarItems.length;
     selectSlot(next);
