@@ -109,8 +109,14 @@ interface FlyingArrow {
   shooterId: string;
 }
 
+interface StuckArrow {
+  mesh: THREE.Group;
+  expiresAt: number;
+}
+
 const flyingArrows: FlyingArrow[] = [];
-const stuckArrows: THREE.Group[] = [];
+const stuckArrows: StuckArrow[] = [];
+const STUCK_ARROW_LIFETIME = 30;
 
 const cameraRig = new THREE.Group();
 const cameraPitch = new THREE.Group();
@@ -271,6 +277,7 @@ function animate() {
   updateDeathState(frameDt);
   updateHeldItem(frameDt);
   updateArrows(frameDt);
+  updateStuckArrows();
   updateRemotePlayers(frameDt);
   updateRemoteDeathAnimations(frameDt);
   updateCamera();
@@ -930,7 +937,7 @@ function updateArrows(dt: number) {
       const dy = nextPos.y - (player.position.y + PLAYER_HEIGHT * 0.5);
       if (dx * dx + dz * dz < ARROW_HIT_RADIUS * ARROW_HIT_RADIUS && Math.abs(dy) < PLAYER_HEIGHT * 0.6) {
         sendHitPlayer(networkState.myId, arrow.shooterId);
-        stickArrow(arrow);
+        stickArrowToPlayer(arrow, cameraRig);
         continue;
       }
     }
@@ -944,7 +951,7 @@ function updateArrows(dt: number) {
         const ay = nextPos.y - (avatar.root.position.y + PLAYER_HEIGHT * 0.5);
         if (ax * ax + az * az < ARROW_HIT_RADIUS * ARROW_HIT_RADIUS && Math.abs(ay) < PLAYER_HEIGHT * 0.6) {
           sendHitPlayer(avatar.id, arrow.shooterId);
-          stickArrow(arrow);
+          stickArrowToPlayer(arrow, avatar.root);
           break;
         }
       }
@@ -972,12 +979,47 @@ function sendHitPlayer(targetId: string, _attackerId: string) {
 
 function stickArrow(arrow: FlyingArrow) {
   arrow.alive = false;
-  stuckArrows.push(arrow.mesh);
+  const now = performance.now() / 1000;
+  stuckArrows.push({ mesh: arrow.mesh, expiresAt: now + STUCK_ARROW_LIFETIME });
+  pruneStuckArrows();
+}
 
+function stickArrowToPlayer(arrow: FlyingArrow, target: THREE.Object3D) {
+  arrow.alive = false;
+  // Convert arrow world position to target's local space
+  const localPos = target.worldToLocal(arrow.mesh.position.clone());
+  arrowsLayer.remove(arrow.mesh);
+  arrow.mesh.position.copy(localPos);
+  // Convert world rotation to local
+  const worldQuat = new THREE.Quaternion();
+  arrow.mesh.getWorldQuaternion(worldQuat);
+  const parentQuat = new THREE.Quaternion();
+  target.getWorldQuaternion(parentQuat);
+  arrow.mesh.quaternion.copy(parentQuat.invert().multiply(worldQuat));
+
+  target.add(arrow.mesh);
+  const now = performance.now() / 1000;
+  stuckArrows.push({ mesh: arrow.mesh, expiresAt: now + STUCK_ARROW_LIFETIME });
+  pruneStuckArrows();
+}
+
+function pruneStuckArrows() {
   while (stuckArrows.length > MAX_STUCK_ARROWS) {
     const old = stuckArrows.shift()!;
-    arrowsLayer.remove(old);
-    disposeObject3D(old);
+    old.mesh.removeFromParent();
+    disposeObject3D(old.mesh);
+  }
+}
+
+function updateStuckArrows() {
+  const now = performance.now() / 1000;
+  for (let i = stuckArrows.length - 1; i >= 0; i--) {
+    if (now >= stuckArrows[i].expiresAt) {
+      const sa = stuckArrows[i];
+      sa.mesh.removeFromParent();
+      disposeObject3D(sa.mesh);
+      stuckArrows.splice(i, 1);
+    }
   }
 }
 
