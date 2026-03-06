@@ -80,6 +80,7 @@ const ARROW_SPEED = 48;
 const ARROW_MAX_DISTANCE = CHUNK_SIZE * (RENDER_DISTANCE + 2);
 const ARROW_GRAVITY = 14;
 const MAX_STUCK_ARROWS = 20;
+const BOW_COOLDOWN = 0.5;
 const MAX_HP = 100;
 const RESPAWN_COUNTDOWN = 5;
 const ARROW_HIT_RADIUS = 0.8;
@@ -166,6 +167,7 @@ heldItemPivot.position.set(0.58, -0.55, -0.75);
 camera.add(heldItemPivot);
 let heldItemMesh: THREE.Object3D | null = null;
 let swingTime = 0;
+let lastShotTime = 0;
 let physicsAccumulator = 0;
 
 const input = {
@@ -856,6 +858,9 @@ function createArrowMesh() {
 
 function shootArrow() {
   if (player.dead) return;
+  const now = performance.now() / 1000;
+  if (now - lastShotTime < BOW_COOLDOWN) return;
+  lastShotTime = now;
   const origin = new THREE.Vector3();
   camera.getWorldPosition(origin);
   const direction = new THREE.Vector3();
