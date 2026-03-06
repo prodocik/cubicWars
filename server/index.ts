@@ -1,634 +1,474 @@
 import { WebSocketServer, WebSocket } from "ws";
-import Database from "better-sqlite3";
-import path from "path";
-import { generateMap, canMoveTo, MAP_W, MAP_H } from "../src/world";
+import { BlockId, PLAYER_HEIGHT, PLAYER_RADIUS, WORLD_HEIGHT } from "../src/voxelWorld";
+import {
+  DEFAULT_SERVER_PORT,
+  SERVER_TICK_RATE,
+  type BlockEditState,
+  type ClientMessage,
+  type JoinMessage,
+  type PlayerStateMessage,
+  type RemotePlayerState,
+  type SetBlockMessage,
+} from "../src/multiplayerProtocol";
 
-const PORT = Number(process.env.PORT) || 3002;
-const DB_PATH = path.join(__dirname, "game.db");
-const TICK_RATE = 60; // ticks per second
-const TICK_MS = 1000 / TICK_RATE;
-const PLAYER_SPEED = 4.8; // tiles per second
-const SNAPSHOT_RATE = 30; // snapshots per second (broadcast rate)
-const SNAPSHOT_INTERVAL = TICK_RATE / SNAPSHOT_RATE; // ticks between snapshots
+const PORT = Number(process.env.PORT) || DEFAULT_SERVER_PORT;
+const SNAPSHOT_INTERVAL_MS = Math.round(1000 / SERVER_TICK_RATE);
+const MAX_COORD = 1_000_000;
+const MAX_NAME_LENGTH = 24;
+const GRAVITY = 31;
+const MAX_FALL_SPEED = 38;
+const GROUND_CHECK = 0.08;
+const COLLISION_EPSILON = 1e-4;
 
-// --- Database setup ---
-const db = new Database(DB_PATH);
-db.pragma("journal_mode = WAL");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS characters (
-    name TEXT PRIMARY KEY,
-    skin_index INTEGER NOT NULL DEFAULT 0,
-    tile_x REAL NOT NULL DEFAULT 25,
-    tile_y REAL NOT NULL DEFAULT 25,
-    inventory TEXT NOT NULL DEFAULT '[]',
-    skills TEXT NOT NULL DEFAULT '{}',
-    hotbar TEXT NOT NULL DEFAULT '[]'
-  )
-`);
-
-const stmtLoad = db.prepare("SELECT * FROM characters WHERE name = ?");
-const stmtCreate = db.prepare(
-  "INSERT INTO characters (name, skin_index, tile_x, tile_y, inventory, skills, hotbar) VALUES (?, ?, 25, 25, ?, ?, ?)"
-);
-const stmtSave = db.prepare(
-  "UPDATE characters SET skin_index=?, tile_x=?, tile_y=?, inventory=?, skills=?, hotbar=? WHERE name=?"
-);
-
-interface CharData {
-  name: string;
-  skinIndex: number;
-  tileX: number;
-  tileY: number;
-  inventory: any[];
-  skills: Record<string, number>;
-  hotbar: (string | null)[];
+interface ServerPlayer extends RemotePlayerState {
+  ws: WebSocket;
+  velocityY: number;
+  onGround: boolean;
 }
 
-function normalizeInventory(items: any[]): any[] {
-  return items.map((item) => {
-    if (!item || typeof item !== "object") return item;
-    if (item.id === "crossbow") {
-      return { ...item, id: "bow", name: "Лук", icon: "🏹" };
+const players = new Map<string, ServerPlayer>();
+const playersBySocket = new Map<WebSocket, ServerPlayer>();
+const blockEdits = new Map<string, number>();
+let nextPlayerId = 1;
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function sanitizeName(value: unknown) {
+  if (typeof value !== "string") return "Player";
+  const cleaned = value.trim().replace(/\s+/g, " ").slice(0, MAX_NAME_LENGTH);
+  return cleaned || "Player";
+}
+
+function sanitizeAngle(value: unknown) {
+  if (!isFiniteNumber(value)) return 0;
+  return value;
+}
+
+function sanitizeCoord(value: unknown, fallback = 0) {
+  if (!isFiniteNumber(value)) return fallback;
+  return clamp(value, -MAX_COORD, MAX_COORD);
+}
+
+function sanitizeHeight(value: unknown, fallback = 24) {
+  if (!isFiniteNumber(value)) return fallback;
+  return clamp(value, -32, WORLD_HEIGHT + 32);
+}
+
+function sanitizeHeldItemId(value: unknown) {
+  if (typeof value !== "string") return "block:1";
+  return value.slice(0, 32) || "block:1";
+}
+
+function parseJoinMessage(raw: unknown): JoinMessage | null {
+  if (!raw || typeof raw !== "object") return null;
+  const msg = raw as Record<string, unknown>;
+  if (msg.type !== "join") return null;
+  return {
+    type: "join",
+    name: sanitizeName(msg.name),
+    x: sanitizeCoord(msg.x, 0.5),
+    y: sanitizeHeight(msg.y, 24),
+    z: sanitizeCoord(msg.z, 0.5),
+    yaw: sanitizeAngle(msg.yaw),
+    pitch: sanitizeAngle(msg.pitch),
+    heldItemId: sanitizeHeldItemId(msg.heldItemId),
+  };
+}
+
+function isPlayerStateMessage(raw: unknown): raw is PlayerStateMessage {
+  if (!raw || typeof raw !== "object") return false;
+  return (raw as Record<string, unknown>).type === "player_state";
+}
+
+function isSetBlockMessage(raw: unknown): raw is SetBlockMessage {
+  if (!raw || typeof raw !== "object") return false;
+  return (raw as Record<string, unknown>).type === "set_block";
+}
+
+function playerPublicState(player: ServerPlayer): RemotePlayerState {
+  return {
+    id: player.id,
+    name: player.name,
+    x: player.x,
+    y: player.y,
+    z: player.z,
+    yaw: player.yaw,
+    pitch: player.pitch,
+    heldItemId: player.heldItemId,
+  };
+}
+
+function sendTo(ws: WebSocket, message: object) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(message));
+  }
+}
+
+function broadcast(message: object, excludeId?: string) {
+  const payload = JSON.stringify(message);
+  for (const player of players.values()) {
+    if (player.id === excludeId) continue;
+    if (player.ws.readyState === WebSocket.OPEN) {
+      player.ws.send(payload);
     }
-    return item;
-  });
+  }
 }
 
-function loadCharacter(name: string): CharData | null {
-  const row = stmtLoad.get(name) as any;
-  if (!row) return null;
-  return {
-    name: row.name,
-    skinIndex: row.skin_index,
-    tileX: row.tile_x,
-    tileY: row.tile_y,
-    inventory: normalizeInventory(JSON.parse(row.inventory)),
-    skills: JSON.parse(row.skills),
-    hotbar: JSON.parse(row.hotbar),
-  };
+function editKey(x: number, y: number, z: number) {
+  return `${x},${y},${z}`;
 }
 
-const defaultInventory = [
-  { id: "banner", name: "\u0411\u0430\u043d\u043d\u0435\u0440", color: "#2f9e62", icon: "\ud83c\udff4", quantity: 3 },
-  { id: "axe", name: "\u0422\u043e\u043f\u043e\u0440", color: "#888", icon: "\ud83e\ude93", quantity: 1 },
-  { id: "pickaxe", name: "\u041a\u0438\u0440\u043a\u0430", color: "#888", icon: "\u26cf\ufe0f", quantity: 1 },
-  { id: "bow", name: "\u041b\u0443\u043a", color: "#555", icon: "\ud83c\udff9", quantity: 1 },
-];
-
-function createCharacter(name: string, skinIndex: number): CharData {
-  const inv = JSON.stringify(defaultInventory);
-  const skills = JSON.stringify({ lumberjack: 0, miner: 0 });
-  const hotbar = JSON.stringify(new Array(10).fill(null));
-  stmtCreate.run(name, skinIndex, inv, skills, hotbar);
-  return {
-    name,
-    skinIndex,
-    tileX: 25,
-    tileY: 25,
-    inventory: JSON.parse(JSON.stringify(defaultInventory)),
-    skills: { lumberjack: 0, miner: 0 },
-    hotbar: new Array(10).fill(null),
-  };
+function serializeBlockEdits(): BlockEditState[] {
+  const edits: BlockEditState[] = [];
+  for (const [key, block] of blockEdits) {
+    const [x, y, z] = key.split(",").map(Number);
+    edits.push({ x, y, z, block });
+  }
+  return edits;
 }
 
-function saveCharacter(data: CharData) {
-  stmtSave.run(
-    data.skinIndex,
-    data.tileX,
-    data.tileY,
-    JSON.stringify(data.inventory),
-    JSON.stringify(data.skills),
-    JSON.stringify(data.hotbar),
-    data.name
+function handlePlayerState(player: ServerPlayer, msg: PlayerStateMessage) {
+  const previousY = player.y;
+  const proposedY = sanitizeHeight(msg.y, player.y);
+  const grounded = player.onGround || hasGroundContact(player);
+  player.x = sanitizeCoord(msg.x, player.x);
+  player.z = sanitizeCoord(msg.z, player.z);
+  player.yaw = sanitizeAngle(msg.yaw);
+  player.pitch = sanitizeAngle(msg.pitch);
+  player.heldItemId = sanitizeHeldItemId(msg.heldItemId);
+
+  const deltaY = proposedY - previousY;
+  if (grounded && Math.abs(deltaY) <= 0.08) {
+    player.y = proposedY;
+  }
+
+  if (grounded && deltaY > 0.02 && deltaY < 0.9) {
+    player.y = proposedY;
+    player.velocityY = Math.max(player.velocityY, deltaY * SERVER_TICK_RATE);
+    player.onGround = false;
+  }
+}
+
+function handleSetBlock(player: ServerPlayer, msg: SetBlockMessage) {
+  const x = Math.floor(sanitizeCoord(msg.x, 0));
+  const y = Math.floor(sanitizeHeight(msg.y, 0));
+  const z = Math.floor(sanitizeCoord(msg.z, 0));
+  const block = Math.floor(sanitizeCoord(msg.block, BlockId.Air));
+
+  if (y < 0 || y >= WORLD_HEIGHT) return;
+  blockEdits.set(editKey(x, y, z), block);
+  broadcast({ type: "set_block", by: player.id, x, y, z, block }, player.id);
+}
+
+function getBlock(x: number, y: number, z: number): BlockId {
+  if (y < 0) return BlockId.Stone;
+  if (y >= WORLD_HEIGHT) return BlockId.Air;
+
+  const edited = blockEdits.get(editKey(x, y, z));
+  if (edited !== undefined) return edited as BlockId;
+  return sampleGeneratedBlock(x, y, z);
+}
+
+function sampleGeneratedBlock(x: number, y: number, z: number): BlockId {
+  const surface = surfaceHeight(x, z);
+  if (y > surface) {
+    return sampleTreeBlock(x, y, z);
+  }
+  if (y === surface) return BlockId.Grass;
+  if (y >= surface - 3) return BlockId.Dirt;
+  return BlockId.Stone;
+}
+
+function surfaceHeight(x: number, z: number) {
+  const continental = fbm2D(x * 0.003, z * 0.003, 4, 2) * 18;
+  const hills = fbm2D(x * 0.012, z * 0.012, 3, 11) * 7;
+  const detail = fbm2D(x * 0.04, z * 0.04, 2, 37) * 2;
+  const raw = 18 + continental + hills + detail;
+  const dist = Math.sqrt(x * x + z * z);
+  const spawnBlend = Math.max(0, 1 - dist / 18);
+  const flattened = lerp(raw, 18, spawnBlend);
+  return Math.max(6, Math.min(WORLD_HEIGHT - 8, Math.floor(flattened)));
+}
+
+function sampleTreeBlock(x: number, y: number, z: number): BlockId {
+  for (let tz = z - 2; tz <= z + 2; tz++) {
+    for (let tx = x - 2; tx <= x + 2; tx++) {
+      if (!hasTree(tx, tz)) continue;
+      const surface = surfaceHeight(tx, tz);
+      const trunkTop = surface + 4;
+      if (x === tx && z === tz && y > surface && y <= trunkTop) {
+        return BlockId.Log;
+      }
+      if (y >= trunkTop - 1 && y <= trunkTop + 1) {
+        const dx = Math.abs(x - tx);
+        const dz = Math.abs(z - tz);
+        if (dx + dz <= 2) return BlockId.Leaves;
+        if (dx <= 1 && dz <= 1 && y <= trunkTop + 1) return BlockId.Leaves;
+      }
+    }
+  }
+  return BlockId.Air;
+}
+
+function hasTree(x: number, z: number) {
+  if (x >= -8 && x <= 8 && z >= -8 && z <= 8) return false;
+  const density = value2D(x * 0.08, z * 0.08, 71);
+  const randomness = value2D(x * 0.21 + 100, z * 0.21 - 80, 113);
+  return density > 0.58 && randomness > 0.73;
+}
+
+function isCollidable(block: BlockId) {
+  return block !== BlockId.Air && block !== BlockId.Leaves;
+}
+
+function collides(minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number) {
+  const startX = Math.floor(minX);
+  const endX = Math.floor(maxX - 0.0001);
+  const startY = Math.floor(minY);
+  const endY = Math.floor(maxY - 0.0001);
+  const startZ = Math.floor(minZ);
+  const endZ = Math.floor(maxZ - 0.0001);
+
+  for (let y = startY; y <= endY; y++) {
+    for (let z = startZ; z <= endZ; z++) {
+      for (let x = startX; x <= endX; x++) {
+        if (isCollidable(getBlock(x, y, z))) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function bodyCollidesAt(x: number, y: number, z: number) {
+  return collides(
+    x - PLAYER_RADIUS + COLLISION_EPSILON,
+    y + COLLISION_EPSILON,
+    z - PLAYER_RADIUS + COLLISION_EPSILON,
+    x + PLAYER_RADIUS - COLLISION_EPSILON,
+    y + PLAYER_HEIGHT - COLLISION_EPSILON,
+    z + PLAYER_RADIUS - COLLISION_EPSILON
   );
 }
 
-// --- Game state ---
-const MAX_HP = 100;
-const BULLET_DAMAGE = 34;
-const RESPAWN_TIME = 5; // seconds
-
-interface PlayerState {
-  id: string;
-  ws: WebSocket;
-  char: CharData;
-  path: { x: number; y: number }[];
-  inputDx: number;
-  inputDy: number;
-  lastInputSeq: number;
-  lastShotTime: number;
-  hp: number;
-  dead: boolean;
-  respawnTimer: number; // seconds remaining
-  kills: number;
-  deaths: number;
+function hasGroundContact(player: ServerPlayer) {
+  return collides(
+    player.x - PLAYER_RADIUS + COLLISION_EPSILON,
+    player.y - GROUND_CHECK,
+    player.z - PLAYER_RADIUS + COLLISION_EPSILON,
+    player.x + PLAYER_RADIUS - COLLISION_EPSILON,
+    player.y,
+    player.z + PLAYER_RADIUS - COLLISION_EPSILON
+  );
 }
 
-interface Bullet {
-  id: number;
-  ownerId: string;
-  x: number;
-  y: number;
-  dx: number; // direction (normalized)
-  dy: number;
-  speed: number; // tiles per second
-  age: number; // seconds alive
-}
-
-const BULLET_SPEED = 24; // tiles per second
-const SHOOT_COOLDOWN = 0.2; // seconds between shots
-const BULLET_MAX_AGE = 1.5; // seconds before despawn
-const SHOT_RANGE = 20;
-const HIT_RADIUS = 0.45;
-const MAP_BOUNDS = 50;
-
-const players = new Map<string, PlayerState>(); // id -> state
-const wsByPlayer = new Map<WebSocket, PlayerState>();
-const bullets: Bullet[] = [];
-const tiles = generateMap();
-const stumps = new Set<string>(); // chopped trees (also tracked server-side)
-const minedRocks = new Set<string>(); // mined rocks tracked server-side
-let nextId = 1;
-let nextBulletId = 1;
-let tickCount = 0;
-
-function sendTo(ws: WebSocket, msg: object) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(msg));
+function findSafeY(player: ServerPlayer) {
+  const baseY = Math.floor(player.y);
+  for (let offset = 0; offset <= 32; offset++) {
+    const candidate = baseY + offset + 0.001;
+    if (!bodyCollidesAt(player.x, candidate, player.z)) return candidate;
   }
+  return surfaceHeight(Math.floor(player.x), Math.floor(player.z)) + 1;
 }
 
-function hasRock(x: number, y: number): boolean {
-  if (x >= 22 && x <= 28 && y >= 22 && y <= 28) return false;
-  if (tiles[y][x] !== TileType.Grass && tiles[y][x] !== TileType.Dirt) return false;
-  const h = ((x * 31 + y * 47 + x * y * 7) & 0x7fffffff) % 100;
-  return h < 8;
-}
+function moveVertical(player: ServerPlayer, dy: number) {
+  if (dy === 0) return;
 
-function isBlockedTile(x: number, y: number): boolean {
-  if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H) return true;
-  if (!isWalkable(tiles[y][x], stumps, x, y)) return true;
-  return hasRock(x, y) && !minedRocks.has(`${x},${y}`);
-}
-
-function raycastDistance(originX: number, originY: number, dx: number, dy: number, maxDistance: number): number {
-  for (let distance = 0.25; distance <= maxDistance; distance += 0.2) {
-    const sampleX = originX + dx * distance;
-    const sampleY = originY + dy * distance;
-    const tileX = Math.floor(sampleX);
-    const tileY = Math.floor(sampleY);
-    if (isBlockedTile(tileX, tileY)) {
-      return Math.max(0.2, distance - 0.1);
-    }
+  const startY = player.y;
+  const targetY = startY + dy;
+  if (!bodyCollidesAt(player.x, targetY, player.z)) {
+    player.y = targetY;
+    return;
   }
-  return maxDistance;
-}
 
-function broadcast(msg: object, exclude?: string) {
-  const data = JSON.stringify(msg);
-  for (const [id, p] of players) {
-    if (id !== exclude && p.ws.readyState === WebSocket.OPEN) {
-      p.ws.send(data);
-    }
-  }
-}
-
-function broadcastLeaderboard() {
-  const board: { id: string; name: string; kills: number; deaths: number }[] = [];
-  for (const [, p] of players) {
-    board.push({ id: p.id, name: p.char.name, kills: p.kills, deaths: p.deaths });
-  }
-  board.sort((a, b) => b.kills - a.kills);
-  const msg = JSON.stringify({ type: "leaderboard", board });
-  for (const [, p] of players) {
-    if (p.ws.readyState === WebSocket.OPEN) p.ws.send(msg);
-  }
-}
-
-// --- Server tick loop ---
-function tick() {
-  const dt = 1 / TICK_RATE;
-  tickCount++;
-
-  for (const [, p] of players) {
-    // Respawn timer
-    if (p.dead) {
-      p.respawnTimer -= dt;
-      if (p.respawnTimer <= 0) {
-        p.dead = false;
-        p.hp = MAX_HP;
-        // Random spawn position in safe area
-        p.char.tileX = 20 + Math.random() * 10;
-        p.char.tileY = 20 + Math.random() * 10;
-        p.path = [];
-        p.inputDx = 0;
-        p.inputDy = 0;
-        sendTo(p.ws, { type: "respawn", x: p.char.tileX, y: p.char.tileY, hp: p.hp });
-        broadcast({ type: "player_respawn", id: p.id, x: p.char.tileX, y: p.char.tileY }, p.id);
-      }
-      continue; // dead players don't move
-    }
-
-    // Path-based movement (click-to-move)
-    if (p.path.length > 0) {
-      let remaining = PLAYER_SPEED * dt;
-      while (remaining > 0 && p.path.length > 0) {
-        const target = p.path[0];
-        const dx = target.x - p.char.tileX;
-        const dy = target.y - p.char.tileY;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist <= 0.001) {
-          p.path.shift();
-          continue;
-        }
-        if (remaining >= dist) {
-          p.char.tileX = target.x;
-          p.char.tileY = target.y;
-          remaining -= dist;
-          p.path.shift();
-        } else {
-          p.char.tileX += (dx / dist) * remaining;
-          p.char.tileY += (dy / dist) * remaining;
-          remaining = 0;
-        }
-      }
-    }
-
-    // Free input movement (WASD / shooter mode)
-    if (p.inputDx !== 0 || p.inputDy !== 0) {
-      let dx = p.inputDx;
-      let dy = p.inputDy;
-      const len = Math.sqrt(dx * dx + dy * dy);
-      if (len > 0) {
-        dx /= len;
-        dy /= len;
-      }
-      const newX = p.char.tileX + dx * PLAYER_SPEED * dt;
-      const newY = p.char.tileY + dy * PLAYER_SPEED * dt;
-      // Try full move, then axis-by-axis (wall sliding)
-      if (canMoveTo(tiles, stumps, newX, newY)) {
-        p.char.tileX = newX;
-        p.char.tileY = newY;
+  let low = Math.min(startY, targetY);
+  let high = Math.max(startY, targetY);
+  for (let i = 0; i < 12; i++) {
+    const mid = (low + high) * 0.5;
+    if (bodyCollidesAt(player.x, mid, player.z)) {
+      if (dy > 0) {
+        high = mid;
       } else {
-        if (canMoveTo(tiles, stumps, newX, p.char.tileY)) {
-          p.char.tileX = newX;
-        }
-        if (canMoveTo(tiles, stumps, p.char.tileX, newY)) {
-          p.char.tileY = newY;
-        }
+        low = mid;
       }
-      p.path = [];
-    }
-
-    // Clamp to map bounds
-    p.char.tileX = Math.max(0, Math.min(MAP_W - 1, p.char.tileX));
-    p.char.tileY = Math.max(0, Math.min(MAP_H - 1, p.char.tileY));
-  }
-
-    // Update bullets
-  for (let i = bullets.length - 1; i >= 0; i--) {
-    const b = bullets[i];
-    b.x += b.dx * b.speed * dt;
-    b.y += b.dy * b.speed * dt;
-    b.age += dt;
-
-    // Remove if out of bounds or too old
-    if (b.x < -1 || b.y < -1 || b.x > MAP_BOUNDS + 1 || b.y > MAP_BOUNDS + 1 || b.age > BULLET_MAX_AGE) {
-      bullets.splice(i, 1);
-      continue;
-    }
-
-    // Hit detection against players
-    const HIT_RADIUS = 0.7;
-    for (const [pid, p] of players) {
-      if (pid === b.ownerId || p.dead) continue;
-      const pdx = p.char.tileX - b.x;
-      const pdy = p.char.tileY - b.y;
-      if (pdx * pdx + pdy * pdy < HIT_RADIUS * HIT_RADIUS) {
-        if (typeof p.hp !== "number" || isNaN(p.hp)) p.hp = MAX_HP;
-        p.hp -= BULLET_DAMAGE;
-        const killed = p.hp <= 0;
-
-        if (killed) {
-          p.hp = 0;
-          p.dead = true;
-          p.respawnTimer = RESPAWN_TIME;
-          p.deaths++;
-          p.path = [];
-          p.inputDx = 0;
-          p.inputDy = 0;
-          // Credit kill to shooter
-          const shooter = players.get(b.ownerId);
-          if (shooter) shooter.kills++;
-        }
-
-        console.log(`HIT: bullet ${b.id} hit ${p.char.name}, hp: ${p.hp}, killed: ${killed}`);
-        // Broadcast hit
-        broadcast({
-          type: "hit",
-          targetId: pid,
-          bulletId: b.id,
-          x: b.x, y: b.y,
-          shooterId: b.ownerId,
-          damage: BULLET_DAMAGE,
-          targetHp: p.hp,
-          killed,
-        });
-
-        // Send leaderboard update
-        broadcastLeaderboard();
-
-        bullets.splice(i, 1);
-        break;
-      }
+    } else if (dy > 0) {
+      low = mid;
+    } else {
+      high = mid;
     }
   }
 
-  // Broadcast snapshot at SNAPSHOT_RATE
-  if (players.size > 0 && tickCount % SNAPSHOT_INTERVAL === 0) {
-    const snapshot: any[] = [];
-    for (const [, p] of players) {
-      snapshot.push({
-        id: p.id,
-        x: Math.round(p.char.tileX * 1000) / 1000,
-        y: Math.round(p.char.tileY * 1000) / 1000,
-        seq: p.lastInputSeq,
-        hp: p.hp,
-        dead: p.dead,
-      });
-    }
-    const msg = JSON.stringify({ type: "snapshot", tick: tickCount, players: snapshot });
-    for (const [, p] of players) {
-      if (p.ws.readyState === WebSocket.OPEN) {
-        p.ws.send(msg);
-      }
-    }
+  player.y = dy > 0 ? low : high;
+  if (dy < 0) player.onGround = true;
+  player.velocityY = 0;
+}
+
+function simulatePlayer(player: ServerPlayer, dt: number) {
+  if (bodyCollidesAt(player.x, player.y, player.z)) {
+    player.y = findSafeY(player);
+    player.velocityY = 0;
   }
 
-  // Auto-save every 600 ticks (~30 seconds)
-  if (tickCount % (TICK_RATE * 30) === 0) {
-    for (const [, p] of players) {
-      saveCharacter(p.char);
+  player.onGround = hasGroundContact(player);
+  if (!player.onGround || player.velocityY > 0) {
+    player.velocityY = Math.max(player.velocityY - GRAVITY * dt, -MAX_FALL_SPEED);
+    moveVertical(player, player.velocityY * dt);
+    player.onGround = hasGroundContact(player);
+    if (player.onGround && player.velocityY < 0) {
+      player.velocityY = 0;
     }
+  } else {
+    player.velocityY = 0;
   }
 }
 
-// --- WebSocket server ---
-const wss = new WebSocketServer({ port: PORT });
+function fbm2D(x: number, z: number, octaves: number, seed: number) {
+  let amplitude = 1;
+  let frequency = 1;
+  let sum = 0;
+  let max = 0;
+  for (let i = 0; i < octaves; i++) {
+    sum += value2D(x * frequency, z * frequency, seed + i * 101) * amplitude;
+    max += amplitude;
+    amplitude *= 0.5;
+    frequency *= 2;
+  }
+  return sum / max;
+}
+
+function value2D(x: number, z: number, seed: number) {
+  const ix = Math.floor(x);
+  const iz = Math.floor(z);
+  const fx = x - ix;
+  const fz = z - iz;
+
+  const a = hash2(ix, iz, seed);
+  const b = hash2(ix + 1, iz, seed);
+  const c = hash2(ix, iz + 1, seed);
+  const d = hash2(ix + 1, iz + 1, seed);
+
+  const ux = smooth(fx);
+  const uz = smooth(fz);
+  const ab = lerp(a, b, ux);
+  const cd = lerp(c, d, ux);
+  return lerp(ab, cd, uz);
+}
+
+function hash2(x: number, z: number, seed: number) {
+  let h = x * 374761393 + z * 668265263 + seed * 69069;
+  h = (h ^ (h >> 13)) >>> 0;
+  h = Math.imul(h, 1274126177) >>> 0;
+  return (h & 0xffff) / 0xffff;
+}
+
+function smooth(t: number) {
+  return t * t * (3 - 2 * t);
+}
+
+function lerp(a: number, b: number, t: number) {
+  return a + (b - a) * t;
+}
+
+const wss = new WebSocketServer({ host: "0.0.0.0", port: PORT });
 
 wss.on("connection", (ws) => {
-  const id = String(nextId++);
-  let state: PlayerState | null = null;
+  let joined = false;
 
   ws.on("message", (raw) => {
+    let message: ClientMessage | null = null;
     try {
-      const msg = JSON.parse(String(raw));
+      message = JSON.parse(raw.toString()) as ClientMessage;
+    } catch {
+      return;
+    }
 
-      if (msg.type === "join") {
-        const name = String(msg.name).slice(0, 20);
-        const skinIndex = Number(msg.skinIndex) || 0;
+    if (!joined) {
+      const join = parseJoinMessage(message);
+      if (!join) return;
 
-        let char = loadCharacter(name);
-        if (!char) {
-          char = createCharacter(name, skinIndex);
-          console.log(`New character "${name}" created`);
-        } else {
-          console.log(`Loaded character "${name}"`);
-          char.skinIndex = skinIndex;
-        }
+      const player: ServerPlayer = {
+        id: String(nextPlayerId++),
+        ws,
+        name: join.name,
+        x: join.x,
+        y: join.y,
+        z: join.z,
+        yaw: join.yaw,
+        pitch: join.pitch,
+        heldItemId: join.heldItemId,
+        velocityY: 0,
+        onGround: false,
+      };
 
-        state = {
-          id, ws, char,
-          path: [],
-          inputDx: 0, inputDy: 0,
-          lastInputSeq: 0, lastShotTime: 0,
-          hp: MAX_HP, dead: false, respawnTimer: 0,
-          kills: 0, deaths: 0,
-        };
-        players.set(id, state);
-        wsByPlayer.set(ws, state);
-
-        // Send init
-        const existing: any[] = [];
-        for (const [pid, p] of players) {
-          if (pid !== id) {
-            existing.push({
-              id: p.id, name: p.char.name, skinIndex: p.char.skinIndex,
-              tileX: p.char.tileX, tileY: p.char.tileY,
-            });
-          }
-        }
-
-        sendTo(ws, {
-          type: "init",
-          id,
-          tickRate: TICK_RATE,
-          players: existing,
-          world: {
-            stumps: [...stumps],
-            minedRocks: [...minedRocks],
-          },
-          character: {
-            tileX: char.tileX,
-            tileY: char.tileY,
-            skinIndex: char.skinIndex,
-            inventory: char.inventory,
-            skills: char.skills,
-            hotbar: char.hotbar,
-            hp: MAX_HP,
-          },
-        });
-
-        // Send current leaderboard
-        broadcastLeaderboard();
-
-        broadcast({
-          type: "join",
-          player: {
-            id, name: char.name, skinIndex: char.skinIndex,
-            tileX: char.tileX, tileY: char.tileY,
-          },
-        }, id);
+      if (bodyCollidesAt(player.x, player.y, player.z)) {
+        player.y = findSafeY(player);
       }
+      player.onGround = hasGroundContact(player);
 
-      if (!state) return;
+      players.set(player.id, player);
+      playersBySocket.set(ws, player);
+      joined = true;
 
-      // Path-based movement (click somewhere on map)
-      if (msg.type === "move") {
-        state.char.tileX = msg.tileX;
-        state.char.tileY = msg.tileY;
-        state.path = msg.path || [];
-        state.inputDx = 0;
-        state.inputDy = 0;
-        // Broadcast to others so they see the path too (for smooth prediction)
-        broadcast({
-          type: "move", id,
-          tileX: msg.tileX, tileY: msg.tileY,
-          path: msg.path,
-        }, id);
-      }
+      sendTo(ws, {
+        type: "init",
+        id: player.id,
+        tickRate: SERVER_TICK_RATE,
+        players: Array.from(players.values()).map(playerPublicState),
+        blocks: serializeBlockEdits(),
+      });
 
-      // Direct input movement (WASD, for shooter mode)
-      if (msg.type === "input") {
-        state.inputDx = Number(msg.dx) || 0;
-        state.inputDy = Number(msg.dy) || 0;
-        if (typeof msg.seq === "number") {
-          state.lastInputSeq = msg.seq;
-        }
-        // Clear path when switching to direct input
-        if (state.inputDx !== 0 || state.inputDy !== 0) {
-          state.path = [];
-        }
-      }
+      broadcast({ type: "player_join", player: playerPublicState(player) }, player.id);
+      console.log(`Player joined: ${player.name}#${player.id}`);
+      return;
+    }
 
-      // Stop movement
-      if (msg.type === "stop") {
-        state.path = [];
-        state.inputDx = 0;
-        state.inputDy = 0;
-      }
+    const player = playersBySocket.get(ws);
+    if (!player) return;
 
-      if (msg.type === "chop") {
-        const key = `${msg.x},${msg.y}`;
-        if (!stumps.has(key)) {
-          stumps.add(key);
-          broadcast({ type: "chop", x: msg.x, y: msg.y, id });
-        }
-      }
+    if (isPlayerStateMessage(message)) {
+      handlePlayerState(player, message);
+      return;
+    }
 
-      if (msg.type === "mine") {
-        const key = `${msg.x},${msg.y}`;
-        if (!minedRocks.has(key)) {
-          minedRocks.add(key);
-          broadcast({ type: "mine", x: msg.x, y: msg.y, id });
-        }
-      }
-
-      if (msg.type === "shoot" && !state.dead) {
-        const now = Date.now() / 1000;
-        if (now - state.lastShotTime >= SHOOT_COOLDOWN) {
-          state.lastShotTime = now;
-          const dx = Number(msg.dx) || 0;
-          const dy = Number(msg.dy) || 0;
-          const len = Math.sqrt(dx * dx + dy * dy);
-          if (len > 0) {
-            const dirX = dx / len;
-            const dirY = dy / len;
-            const startX = state.char.tileX;
-            const startY = state.char.tileY;
-            const maxDistance = raycastDistance(startX, startY, dirX, dirY, SHOT_RANGE);
-
-            let targetId: string | null = null;
-            let targetHp = 0;
-            let killed = false;
-            let bestDistance = maxDistance;
-
-            for (const [pid, player] of players) {
-              if (pid === id || player.dead) continue;
-              const relX = player.char.tileX - startX;
-              const relY = player.char.tileY - startY;
-              const along = relX * dirX + relY * dirY;
-              if (along < 0 || along > bestDistance) continue;
-
-              const closestX = startX + dirX * along;
-              const closestY = startY + dirY * along;
-              const offX = player.char.tileX - closestX;
-              const offY = player.char.tileY - closestY;
-              if (offX * offX + offY * offY > HIT_RADIUS * HIT_RADIUS) continue;
-
-              bestDistance = along;
-              targetId = pid;
-              targetHp = player.hp - BULLET_DAMAGE;
-            }
-
-            const hitX = startX + dirX * bestDistance;
-            const hitY = startY + dirY * bestDistance;
-            broadcast({
-              type: "shot",
-              shooterId: id,
-              x: startX,
-              y: startY,
-              dx: dirX,
-              dy: dirY,
-              hitX,
-              hitY,
-            });
-
-            if (targetId) {
-              const player = players.get(targetId);
-              if (player) {
-                player.hp = Math.max(0, targetHp);
-                killed = player.hp <= 0;
-                if (killed) {
-                  player.dead = true;
-                  player.respawnTimer = RESPAWN_TIME;
-                  player.deaths++;
-                  player.path = [];
-                  player.inputDx = 0;
-                  player.inputDy = 0;
-                  const shooter = players.get(id);
-                  if (shooter) shooter.kills++;
-                }
-
-                broadcast({
-                  type: "hit",
-                  targetId,
-                  shooterId: id,
-                  damage: BULLET_DAMAGE,
-                  targetHp: player.hp,
-                  killed,
-                  x: hitX,
-                  y: hitY,
-                });
-                broadcastLeaderboard();
-              }
-            }
-          }
-        }
-      }
-
-      if (msg.type === "flag") {
-        broadcast({ type: "flag", id, flagId: msg.flagId }, id);
-      }
-
-      if (msg.type === "chat") {
-        const text = String(msg.text).slice(0, 120);
-        broadcast({ type: "chat", id, text }, id);
-      }
-
-      if (msg.type === "reset_inventory") {
-        state.char.inventory = JSON.parse(JSON.stringify(defaultInventory));
-        state.char.skills = { lumberjack: 0, miner: 0 };
-        state.char.hotbar = new Array(10).fill(null);
-        saveCharacter(state.char);
-        sendTo(ws, {
-          type: "reset_inventory",
-          inventory: state.char.inventory,
-          skills: state.char.skills,
-        });
-      }
-
-      if (msg.type === "save") {
-        if (msg.inventory) state.char.inventory = msg.inventory;
-        if (msg.skills) state.char.skills = msg.skills;
-        if (msg.hotbar) state.char.hotbar = msg.hotbar;
-        saveCharacter(state.char);
-      }
-    } catch {}
+    if (isSetBlockMessage(message)) {
+      handleSetBlock(player, message);
+    }
   });
 
   ws.on("close", () => {
-    if (state) {
-      saveCharacter(state.char);
-      broadcast({ type: "leave", id });
-      players.delete(id);
-      wsByPlayer.delete(ws);
-    }
+    const player = playersBySocket.get(ws);
+    if (!player) return;
+
+    playersBySocket.delete(ws);
+    players.delete(player.id);
+    broadcast({ type: "player_leave", id: player.id }, player.id);
+    console.log(`Player left: ${player.name}#${player.id}`);
+  });
+
+  ws.on("error", () => {
+    ws.close();
   });
 });
 
-// Start tick loop
-setInterval(tick, TICK_MS);
+setInterval(() => {
+  if (players.size === 0) return;
+  const dt = 1 / SERVER_TICK_RATE;
+  for (const player of players.values()) {
+    simulatePlayer(player, dt);
+  }
+  const snapshot = Array.from(players.values()).map(playerPublicState);
+  broadcast({ type: "snapshot", players: snapshot });
+}, SNAPSHOT_INTERVAL_MS);
 
-console.log(`Game server running on ws://0.0.0.0:${PORT} (${TICK_RATE} tick/s)`);
+wss.on("listening", () => {
+  console.log(`Cubic multiplayer server running on ws://0.0.0.0:${PORT} (${SERVER_TICK_RATE} tick/s)`);
+});
+
+wss.on("error", (error) => {
+  console.error(`Failed to start Cubic multiplayer server on port ${PORT}:`, error);
+});

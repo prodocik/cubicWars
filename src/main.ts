@@ -3,6 +3,12 @@ import AABB from "aabb-3d";
 import { GameLog } from "./gamelog";
 import sweep from "voxel-aabb-sweep";
 import {
+  DEFAULT_SERVER_PORT,
+  SERVER_TICK_RATE,
+  type RemotePlayerState,
+  type ServerMessage,
+} from "./multiplayerProtocol";
+import {
   BlockId,
   CHUNK_SIZE,
   EYE_HEIGHT,
@@ -20,6 +26,36 @@ interface HotbarItem {
   icon?: string;
 }
 
+interface RemoteAvatar {
+  id: string;
+  name: string;
+  root: THREE.Group;
+  headPitch: THREE.Group;
+  leftArm: THREE.Group;
+  rightArm: THREE.Group;
+  leftLeg: THREE.Group;
+  rightLeg: THREE.Group;
+  heldPivot: THREE.Group;
+  heldItemMesh: THREE.Object3D | null;
+  label: THREE.Sprite;
+  targetPosition: THREE.Vector3;
+  targetYaw: number;
+  targetPitch: number;
+  heldItemId: string;
+  lastVisualPosition: THREE.Vector3;
+  walkPhase: number;
+}
+
+interface TitleScreenUi {
+  overlay: HTMLDivElement;
+  subtitle: HTMLDivElement;
+  form: HTMLDivElement;
+  nameInput: HTMLInputElement;
+  serverInput: HTMLInputElement;
+  button: HTMLButtonElement;
+  note: HTMLDivElement;
+}
+
 const MOVE_SPEED = 4.35;
 const SPRINT_MULTIPLIER = 1.3;
 const GRAVITY = 31;
@@ -31,6 +67,7 @@ const MAX_PHYSICS_STEPS = 8;
 const GROUND_CHECK = 0.05;
 const SAFE_FALL_RESET_Y = -16;
 const SWEEP_EPSILON = 1e-4;
+const REMOTE_SMOOTHING = 14;
 const BODY_WIDTH = PLAYER_RADIUS * 2;
 const BODY_HEIGHT = PLAYER_HEIGHT;
 const BODY_RADIUS = PLAYER_RADIUS;
@@ -43,6 +80,8 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color("#87c7ff");
 scene.fog = new THREE.Fog("#87c7ff", CHUNK_SIZE * (RENDER_DISTANCE + 1), CHUNK_SIZE * (RENDER_DISTANCE + 3));
 scene.add(world.scene);
+const remotePlayersLayer = new THREE.Group();
+scene.add(remotePlayersLayer);
 
 const cameraRig = new THREE.Group();
 const cameraPitch = new THREE.Group();
@@ -125,6 +164,23 @@ const bodyMin = new THREE.Vector3();
 const bodyMax = new THREE.Vector3();
 const headMin = new THREE.Vector3();
 const headMax = new THREE.Vector3();
+const tempHslB = { h: 0, s: 0, l: 0 };
+
+const remotePlayers = new Map<string, RemoteAvatar>();
+const networkState = {
+  ws: null as WebSocket | null,
+  connected: false,
+  connecting: false,
+  started: false,
+  myId: "",
+  playerName: "",
+  serverUrl: getDefaultServerUrl(),
+  serverCandidates: [] as string[],
+  currentServerIndex: 0,
+  reconnectTimer: 0 as number,
+  pageActive: document.visibilityState === "visible" && document.hasFocus(),
+  lastError: "",
+};
 
 const hotbarItems: HotbarItem[] = [
   { id: "grass", label: "Grass", kind: "block", block: BlockId.Grass },
@@ -147,13 +203,15 @@ document.body.appendChild(hud.root);
 renderHotbar();
 setHeldItem(hotbarItems[selectedSlot]);
 
-const title = createTitleScreen();
+const title: TitleScreenUi = createTitleScreen();
 document.body.appendChild(title.overlay);
+updateTitleScreen();
 
 wireInput();
 window.addEventListener("resize", onResize);
 
 const clock = new THREE.Clock();
+window.setInterval(() => sendLocalPlayerState(false), Math.round(1000 / SERVER_TICK_RATE));
 animate();
 
 function animate() {
@@ -171,6 +229,7 @@ function animate() {
   if (physicsSteps === MAX_PHYSICS_STEPS) physicsAccumulator = 0;
 
   updateHeldItem(frameDt);
+  updateRemotePlayers(frameDt);
   updateCamera();
   updateDebugColliders();
   updateHud();
@@ -365,7 +424,22 @@ function wireInput() {
 
   document.addEventListener("pointerlockchange", () => {
     pointerLocked = document.pointerLockElement === renderer.domElement;
-    title.overlay.style.display = pointerLocked ? "none" : "flex";
+    updateTitleScreen();
+  });
+
+  window.addEventListener("blur", () => {
+    networkState.pageActive = false;
+    updateTitleScreen();
+  });
+
+  window.addEventListener("focus", () => {
+    networkState.pageActive = document.visibilityState === "visible";
+    updateTitleScreen();
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    networkState.pageActive = document.visibilityState === "visible" && document.hasFocus();
+    updateTitleScreen();
   });
 
   window.addEventListener("mousemove", (event) => {
@@ -472,6 +546,7 @@ function breakBlock() {
   const hit = getTargetedBlock();
   if (!hit) return;
   world.setBlock(hit.block.x, hit.block.y, hit.block.z, BlockId.Air);
+  sendBlockUpdate(hit.block.x, hit.block.y, hit.block.z, BlockId.Air);
 }
 
 function placeBlock() {
@@ -484,6 +559,7 @@ function placeBlock() {
 
   if (intersectsPlayer(place)) return;
   world.setBlock(place.x, place.y, place.z, selected.block);
+  sendBlockUpdate(place.x, place.y, place.z, selected.block);
 }
 
 function getTargetedBlock() {
@@ -511,6 +587,7 @@ function selectSlot(index: number) {
   renderHotbar();
   setHeldItem(hotbarItems[index]);
   gameLog.system(`Selected: ${hotbarItems[index].label}`);
+  sendLocalPlayerState(true);
 }
 
 function setHeldItem(item: HotbarItem) {
@@ -519,21 +596,40 @@ function setHeldItem(item: HotbarItem) {
     heldItemMesh = null;
   }
 
-  let mesh: THREE.Object3D;
+  const mesh = createHeldMeshFromToken(heldItemTokenForItem(item));
+  heldItemMesh = mesh;
+  heldItemPivot.add(mesh);
+}
+
+function heldItemTokenForItem(item: HotbarItem) {
   if (item.kind === "block" && item.block !== undefined) {
-    mesh = world.createBlockPreview(item.block);
+    return `block:${item.block}`;
+  }
+  return item.id;
+}
+
+function getCurrentHeldItemToken() {
+  return heldItemTokenForItem(hotbarItems[selectedSlot]);
+}
+
+function createHeldMeshFromToken(token: string) {
+  let mesh: THREE.Object3D;
+  if (token.startsWith("block:")) {
+    const block = Number(token.slice(6)) as BlockId;
+    mesh = world.createBlockPreview(block);
     mesh.rotation.set(0.35, 0.65, 0);
     mesh.position.set(0.1, -0.1, 0);
-  } else if (item.id === "axe") {
+    return mesh;
+  }
+
+  if (token === "axe") {
     mesh = createAxeMesh();
-  } else if (item.id === "pickaxe") {
+  } else if (token === "pickaxe") {
     mesh = createPickaxeMesh();
   } else {
     mesh = createBowMesh();
   }
-
-  heldItemMesh = mesh;
-  heldItemPivot.add(mesh);
+  return mesh;
 }
 
 function createAxeMesh() {
@@ -598,6 +694,9 @@ function createHud() {
   const chunk = document.createElement("div");
   chunk.style.cssText = "font-size:12px;color:#d3f1d5";
 
+  const status = document.createElement("div");
+  status.style.cssText = "font-size:12px;color:#a8d8ff";
+
   const hint = document.createElement("div");
   hint.style.cssText = "position:absolute;left:50%;bottom:88px;transform:translateX(-50%);padding:6px 10px;border-radius:10px;background:rgba(0,0,0,0.38);font-size:12px;color:#deedde";
   hint.textContent = "WASD move, Space jump, LMB break, RMB place, wheel or 1-9 select";
@@ -605,10 +704,10 @@ function createHud() {
   const hotbar = document.createElement("div");
   hotbar.style.cssText = "position:absolute;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:6px;pointer-events:none";
 
-  info.append(coords, chunk);
+  info.append(coords, chunk, status);
   root.append(crosshair, info, hint, hotbar);
 
-  return { root, coords, chunk, hint, hotbar };
+  return { root, coords, chunk, status, hint, hotbar };
 }
 
 function renderHotbar() {
@@ -659,6 +758,14 @@ function tileIndexForBlock(block: BlockId) {
 function updateHud() {
   hud.coords.textContent = `XYZ ${player.position.x.toFixed(1)} ${player.position.y.toFixed(1)} ${player.position.z.toFixed(1)}`;
   hud.chunk.textContent = `Chunk ${Math.floor(player.position.x / CHUNK_SIZE)}, ${Math.floor(player.position.z / CHUNK_SIZE)}${debugCollidersVisible ? " | debug hitbox" : ""}`;
+  const remoteCount = remotePlayers.size;
+  const serverLabel = networkState.connected
+    ? `Online ${networkState.playerName} | players ${remoteCount + 1}`
+    : networkState.connecting
+      ? "Connecting..."
+      : "Offline";
+  const details = networkState.lastError && !networkState.connected ? ` | ${networkState.lastError}` : "";
+  hud.status.textContent = `${serverLabel} | ${networkState.serverUrl.replace(/^wss?:\/\//, "")}${details}`;
 }
 
 function createTitleScreen() {
@@ -673,21 +780,49 @@ function createTitleScreen() {
   title.style.cssText = "font-size:38px;font-weight:bold;letter-spacing:0.08em;margin-bottom:8px";
 
   const subtitle = document.createElement("div");
-  subtitle.textContent = "Minecraft-first prototype: infinite chunks, mining, placing, FPS camera";
+  subtitle.textContent = "Voxel multiplayer prototype: shared world, mining, placing, other players visible";
   subtitle.style.cssText = "font-size:13px;color:#c1d9f1;line-height:1.5;margin-bottom:18px";
 
+  const form = document.createElement("div");
+  form.style.cssText = "display:flex;flex-direction:column;gap:10px;margin-bottom:16px";
+
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.maxLength = 24;
+  nameInput.value = localStorage.getItem("cubic.playerName") || `Player${Math.floor(100 + Math.random() * 900)}`;
+  nameInput.placeholder = "Player name";
+  nameInput.style.cssText = "padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,0.18);background:rgba(12,18,24,0.8);color:#fff;font:14px monospace;outline:none";
+
+  const serverInput = document.createElement("input");
+  serverInput.type = "text";
+  serverInput.value = localStorage.getItem("cubic.serverUrl") || getDefaultServerUrl();
+  serverInput.placeholder = "ws://host:3002";
+  serverInput.style.cssText = "padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,0.18);background:rgba(12,18,24,0.8);color:#fff;font:14px monospace;outline:none";
+
   const button = document.createElement("button");
-  button.textContent = "Start";
+  button.textContent = "Start Multiplayer";
   button.style.cssText = "padding:14px 18px;width:100%;border:none;border-radius:12px;background:linear-gradient(135deg,#5ab95f,#2d89c8);color:#fff;font:600 15px monospace;cursor:pointer";
-  button.onclick = () => renderer.domElement.requestPointerLock();
+  button.onclick = () => {
+    if (networkState.started) {
+      renderer.domElement.requestPointerLock();
+      return;
+    }
+    const playerName = nameInput.value.trim() || "Player";
+    const serverUrl = normalizeServerUrl(serverInput.value.trim() || getDefaultServerUrl());
+    localStorage.setItem("cubic.playerName", playerName);
+    localStorage.setItem("cubic.serverUrl", serverUrl);
+    startMultiplayer(playerName, serverUrl);
+    renderer.domElement.requestPointerLock();
+  };
 
   const note = document.createElement("div");
-  note.textContent = "Render distance: 7x7 chunks. Textured blocks, held items, block break/place included.";
+  note.textContent = "Другие игроки видны как 3D-аватары. Ломание и установка блоков синхронизируются через сервер.";
   note.style.cssText = "margin-top:14px;font-size:11px;color:#9fb0bd";
 
-  box.append(title, subtitle, button, note);
+  form.append(nameInput, serverInput);
+  box.append(title, subtitle, form, button, note);
   overlay.appendChild(box);
-  return { overlay };
+  return { overlay, subtitle, form, nameInput, serverInput, button, note };
 }
 
 function onResize() {
@@ -708,4 +843,581 @@ function updateDebugColliders() {
 
   debugBodyBox.position.set(player.position.x, player.position.y + BODY_HEIGHT / 2, player.position.z);
   debugHeadBox.position.set(player.position.x, player.position.y + EYE_HEIGHT, player.position.z);
+}
+
+function updateTitleScreen() {
+  if (pointerLocked) {
+    title.overlay.style.display = "none";
+    return;
+  }
+
+  if (!networkState.pageActive && networkState.started) {
+    title.overlay.style.display = "none";
+    return;
+  }
+
+  title.overlay.style.display = "flex";
+
+  if (!networkState.started) {
+    title.subtitle.textContent = "Voxel multiplayer prototype: shared world, mining, placing, other players visible";
+    title.form.style.display = "flex";
+    title.nameInput.disabled = false;
+    title.serverInput.disabled = false;
+    title.button.textContent = "Start Multiplayer";
+    title.note.textContent = "Другие игроки видны как 3D-аватары. Ломание и установка блоков синхронизируются через сервер.";
+    return;
+  }
+
+  title.form.style.display = "none";
+  title.nameInput.disabled = true;
+  title.serverInput.disabled = true;
+  title.button.textContent = "Resume";
+  const reconnecting = networkState.connecting || Boolean(networkState.reconnectTimer);
+  title.subtitle.textContent = networkState.connected
+    ? "Сессия активна. Потеря фокуса больше не переподключает тебя к серверу."
+    : reconnecting
+      ? "Соединение восстанавливается автоматически..."
+      : "Сессия неактивна. Нажми Resume, чтобы вернуться в игру.";
+  title.note.textContent = networkState.lastError && !networkState.connected
+    ? `Сервер: ${networkState.lastError}`
+    : "Чтобы открыть второе окно, просто открой ещё одну вкладку или окно игры и запусти его отдельно.";
+}
+
+function getDefaultServerUrl() {
+  const fallback = getPreferredServerUrl();
+  const query = new URLSearchParams(window.location.search).get("server");
+  if (query) return normalizeServerUrl(query, fallback);
+  return fallback;
+}
+
+function normalizeServerUrl(value: string, fallback = getPreferredServerUrl()) {
+  let raw = value.trim();
+  if (!raw) raw = fallback;
+  if (raw.startsWith("/")) {
+    return makeSameOriginServerUrl(raw);
+  }
+  if (/^https?:\/\//i.test(raw)) {
+    raw = raw.replace(/^http/i, "ws");
+  } else if (!/^wss?:\/\//i.test(raw)) {
+    const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+    raw = `${protocol}://${raw}`;
+  }
+
+  try {
+    const url = new URL(raw);
+    url.hostname = normalizeWsHost(url.hostname);
+    if (!url.port) {
+      url.port = String(DEFAULT_SERVER_PORT);
+    }
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeWsHost(host: string) {
+  if (!host || host === "0.0.0.0" || host === "::" || host === "[::]") {
+    return "localhost";
+  }
+  return host;
+}
+
+function makeServerUrlForHost(host: string) {
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${protocol}://${normalizeWsHost(host)}:${DEFAULT_SERVER_PORT}`;
+}
+
+function makeSameOriginServerUrl(path = "/ws") {
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const host = normalizeWsHost(window.location.hostname || "localhost");
+  const port = window.location.port ? `:${window.location.port}` : "";
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${protocol}://${host}${port}${normalizedPath}`;
+}
+
+function isViteDevClient() {
+  return window.location.port === "5174";
+}
+
+function getPreferredServerUrl() {
+  if (isViteDevClient()) {
+    return makeServerUrlForHost(window.location.hostname || "localhost");
+  }
+  return makeSameOriginServerUrl("/ws");
+}
+
+function buildServerCandidates(preferredUrl: string) {
+  const candidates = new Set<string>();
+  const preferred = normalizeServerUrl(preferredUrl);
+  candidates.add(preferred);
+
+  if (!isViteDevClient()) {
+    candidates.add(makeSameOriginServerUrl("/ws"));
+  }
+
+  const currentHost = normalizeWsHost(window.location.hostname || "localhost");
+  candidates.add(makeServerUrlForHost(currentHost));
+
+  if (currentHost !== "localhost") {
+    candidates.add(makeServerUrlForHost("localhost"));
+  }
+
+  return Array.from(candidates);
+}
+
+function startMultiplayer(playerName: string, serverUrl: string) {
+  networkState.started = true;
+  networkState.playerName = playerName;
+  networkState.lastError = "";
+  networkState.serverCandidates = buildServerCandidates(serverUrl);
+  networkState.currentServerIndex = 0;
+  networkState.serverUrl = networkState.serverCandidates[0] || getDefaultServerUrl();
+  updateTitleScreen();
+  if (networkState.reconnectTimer) {
+    window.clearTimeout(networkState.reconnectTimer);
+    networkState.reconnectTimer = 0;
+  }
+  if (networkState.ws) {
+    networkState.ws.close();
+  }
+  clearRemotePlayers();
+  connectMultiplayer();
+}
+
+function connectMultiplayer() {
+  if (!networkState.started) return;
+  if (networkState.connecting) return;
+
+  networkState.serverUrl = networkState.serverCandidates[networkState.currentServerIndex] || getDefaultServerUrl();
+  networkState.lastError = "";
+  networkState.connecting = true;
+  const ws = new WebSocket(networkState.serverUrl);
+  networkState.ws = ws;
+
+  ws.onopen = () => {
+    if (networkState.ws !== ws) return;
+    networkState.connecting = false;
+    networkState.connected = true;
+    networkState.lastError = "";
+    updateTitleScreen();
+    ws.send(JSON.stringify({
+      type: "join",
+      name: networkState.playerName,
+      x: player.position.x,
+      y: player.position.y,
+      z: player.position.z,
+      yaw,
+      pitch,
+      heldItemId: getCurrentHeldItemToken(),
+    }));
+    gameLog.success(`Connected to ${networkState.serverUrl}`);
+  };
+
+  ws.onmessage = (event) => {
+    let message: ServerMessage | null = null;
+    try {
+      message = JSON.parse(event.data as string) as ServerMessage;
+    } catch {
+      return;
+    }
+    handleServerMessage(message);
+  };
+
+  ws.onclose = () => {
+    if (networkState.ws !== ws) return;
+    networkState.ws = null;
+    networkState.connecting = false;
+    const wasConnected = networkState.connected;
+    networkState.connected = false;
+    networkState.myId = "";
+    clearRemotePlayers();
+    updateTitleScreen();
+    if (networkState.started) {
+      if (wasConnected && networkState.pageActive) {
+        gameLog.warn("Server connection lost. Reconnecting...");
+      }
+      scheduleReconnect();
+    }
+  };
+
+  ws.onerror = () => {
+    networkState.lastError = `no connection to ${networkState.serverUrl.replace(/^wss?:\/\//, "")}`;
+    if (ws.readyState !== WebSocket.CLOSED) {
+      ws.close();
+    }
+  };
+}
+
+function scheduleReconnect() {
+  if (networkState.reconnectTimer) return;
+  networkState.reconnectTimer = window.setTimeout(() => {
+    networkState.reconnectTimer = 0;
+    if (!networkState.connected && networkState.serverCandidates.length > 1) {
+      networkState.currentServerIndex = (networkState.currentServerIndex + 1) % networkState.serverCandidates.length;
+    }
+    connectMultiplayer();
+  }, 2000);
+}
+
+function handleServerMessage(message: ServerMessage) {
+  switch (message.type) {
+    case "init": {
+      networkState.myId = message.id;
+      networkState.connected = true;
+      clearRemotePlayers();
+      for (const edit of message.blocks) {
+        world.setBlock(edit.x, edit.y, edit.z, edit.block as BlockId);
+      }
+      for (const state of message.players) {
+        if (state.id !== networkState.myId) {
+          upsertRemotePlayer(state, true);
+        }
+      }
+      sendLocalPlayerState(true);
+      break;
+    }
+    case "player_join":
+      if (message.player.id !== networkState.myId) {
+        upsertRemotePlayer(message.player, true);
+        gameLog.system(`${message.player.name} joined`);
+      }
+      break;
+    case "player_leave":
+      removeRemotePlayer(message.id);
+      break;
+    case "snapshot": {
+      const seen = new Set<string>();
+      for (const state of message.players) {
+        if (state.id === networkState.myId) continue;
+        seen.add(state.id);
+        upsertRemotePlayer(state, false);
+      }
+      for (const id of remotePlayers.keys()) {
+        if (!seen.has(id)) removeRemotePlayer(id);
+      }
+      break;
+    }
+    case "set_block":
+      world.setBlock(message.x, message.y, message.z, message.block as BlockId);
+      break;
+  }
+}
+
+function sendLocalPlayerState(_force: boolean) {
+  if (!networkState.connected || !networkState.ws || networkState.ws.readyState !== WebSocket.OPEN) return;
+
+  networkState.ws.send(JSON.stringify({
+    type: "player_state",
+    x: player.position.x,
+    y: player.position.y,
+    z: player.position.z,
+    yaw,
+    pitch,
+    heldItemId: getCurrentHeldItemToken(),
+  }));
+}
+
+function sendBlockUpdate(x: number, y: number, z: number, block: BlockId) {
+  if (!networkState.connected || !networkState.ws) return;
+  networkState.ws.send(JSON.stringify({ type: "set_block", x, y, z, block }));
+}
+
+function updateRemotePlayers(dt: number) {
+  const blend = 1 - Math.exp(-REMOTE_SMOOTHING * dt);
+  const limbBlend = 1 - Math.exp(-18 * dt);
+  for (const avatar of remotePlayers.values()) {
+    avatar.root.position.lerp(avatar.targetPosition, blend);
+    avatar.root.rotation.y = lerpAngle(avatar.root.rotation.y, avatar.targetYaw, blend);
+    avatar.headPitch.rotation.x = lerpAngle(avatar.headPitch.rotation.x, avatar.targetPitch, blend);
+
+    const dx = avatar.root.position.x - avatar.lastVisualPosition.x;
+    const dz = avatar.root.position.z - avatar.lastVisualPosition.z;
+    const horizontalSpeed = Math.hypot(dx, dz) / Math.max(dt, 1e-4);
+    avatar.lastVisualPosition.copy(avatar.root.position);
+
+    const strideStrength = Math.min(1, horizontalSpeed / (MOVE_SPEED * 0.72));
+    if (strideStrength > 0.03) {
+      avatar.walkPhase += horizontalSpeed * dt * 4.4;
+    }
+
+    const swing = Math.sin(avatar.walkPhase) * 0.82 * strideStrength;
+    const armSwing = swing * 0.74;
+    const settle = (value: number, target: number) => THREE.MathUtils.lerp(value, target, limbBlend);
+
+    avatar.leftLeg.rotation.x = settle(avatar.leftLeg.rotation.x, swing);
+    avatar.rightLeg.rotation.x = settle(avatar.rightLeg.rotation.x, -swing);
+    avatar.leftArm.rotation.x = settle(avatar.leftArm.rotation.x, -armSwing + 0.06);
+    avatar.rightArm.rotation.x = settle(avatar.rightArm.rotation.x, armSwing - 0.26);
+    avatar.leftArm.rotation.z = settle(avatar.leftArm.rotation.z, -0.04);
+    avatar.rightArm.rotation.z = settle(avatar.rightArm.rotation.z, 0.08);
+  }
+}
+
+function upsertRemotePlayer(state: RemotePlayerState, snapNow: boolean) {
+  let avatar = remotePlayers.get(state.id);
+  if (!avatar) {
+    avatar = createRemotePlayer(state);
+    remotePlayers.set(state.id, avatar);
+  }
+
+  avatar.name = state.name;
+  avatar.targetPosition.set(state.x, state.y, state.z);
+  avatar.targetYaw = state.yaw;
+  avatar.targetPitch = state.pitch;
+
+  if (avatar.heldItemId !== state.heldItemId) {
+    setRemoteHeldItem(avatar, state.heldItemId);
+  }
+
+  if (snapNow) {
+    avatar.root.position.copy(avatar.targetPosition);
+    avatar.root.rotation.y = avatar.targetYaw;
+    avatar.headPitch.rotation.x = avatar.targetPitch;
+    avatar.lastVisualPosition.copy(avatar.root.position);
+  }
+}
+
+function createRemotePlayer(state: RemotePlayerState) {
+  const root = new THREE.Group();
+  const headPitch = new THREE.Group();
+  const leftArm = new THREE.Group();
+  const rightArm = new THREE.Group();
+  const leftLeg = new THREE.Group();
+  const rightLeg = new THREE.Group();
+  const heldPivot = new THREE.Group();
+  const palette = createAvatarPalette(state.name);
+  const shirtMaterial = new THREE.MeshLambertMaterial({ color: palette.shirt });
+  const shirtAccentMaterial = new THREE.MeshLambertMaterial({ color: palette.shirtAccent });
+  const sleeveMaterial = new THREE.MeshLambertMaterial({ color: palette.sleeve });
+  const pantsMaterial = new THREE.MeshLambertMaterial({ color: palette.pants });
+  const shoeMaterial = new THREE.MeshLambertMaterial({ color: palette.shoes });
+  const skinMaterial = new THREE.MeshLambertMaterial({ color: palette.skin });
+  const hairMaterial = new THREE.MeshLambertMaterial({ color: palette.hair });
+  const eyeMaterial = new THREE.MeshBasicMaterial({ color: 0x1f2631 });
+  const mouthMaterial = new THREE.MeshBasicMaterial({ color: 0x8b5343 });
+  const blushMaterial = new THREE.MeshBasicMaterial({ color: 0xffb29f });
+
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.72, 0.28), shirtMaterial);
+  torso.position.y = 1.24;
+  const shirtStripe = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.14, 0.3), shirtAccentMaterial);
+  shirtStripe.position.set(0, 1.33, 0);
+  const shirtHem = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.06, 0.3), shirtAccentMaterial);
+  shirtHem.position.set(0, 0.91, 0);
+  const collar = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.06, 0.31), skinMaterial);
+  collar.position.set(0, 1.53, 0);
+
+  leftLeg.position.set(-0.14, 0.88, 0);
+  rightLeg.position.set(0.14, 0.88, 0);
+  const leftThigh = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.72, 0.24), pantsMaterial);
+  leftThigh.position.y = -0.36;
+  const rightThigh = leftThigh.clone();
+  const leftShoe = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.16, 0.28), shoeMaterial);
+  leftShoe.position.set(0, -0.78, 0.02);
+  const rightShoe = leftShoe.clone();
+  const leftKnee = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.12, 0.02), shirtAccentMaterial);
+  leftKnee.position.set(0, -0.38, 0.13);
+  const rightKnee = leftKnee.clone();
+  leftLeg.add(leftThigh, leftShoe, leftKnee);
+  rightLeg.add(rightThigh, rightShoe, rightKnee);
+
+  leftArm.position.set(-0.4, 1.5, 0);
+  rightArm.position.set(0.4, 1.5, 0);
+  const leftSleeve = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.48, 0.18), sleeveMaterial);
+  leftSleeve.position.y = -0.24;
+  const rightSleeve = leftSleeve.clone();
+  const leftForearm = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.24, 0.16), skinMaterial);
+  leftForearm.position.y = -0.6;
+  const rightForearm = leftForearm.clone();
+  const leftCuff = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.06, 0.19), shirtAccentMaterial);
+  leftCuff.position.y = -0.46;
+  const rightCuff = leftCuff.clone();
+  leftArm.add(leftSleeve, leftForearm, leftCuff);
+  rightArm.add(rightSleeve, rightForearm, rightCuff);
+
+  heldPivot.position.set(0.02, -0.64, 0.14);
+  heldPivot.rotation.set(-0.12, 0.3, 0.7);
+  rightArm.add(heldPivot);
+
+  headPitch.position.y = 1.45;
+  const head = new THREE.Group();
+  head.position.y = 0.24;
+  const skull = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.48, 0.48), skinMaterial);
+  const hairCap = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.18, 0.5), hairMaterial);
+  hairCap.position.y = 0.15;
+  const fringe = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.08, 0.08), hairMaterial);
+  fringe.position.set(0, 0.05, 0.2);
+  const leftEye = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.07, 0.02), eyeMaterial);
+  leftEye.position.set(-0.1, 0.04, 0.25);
+  const rightEye = leftEye.clone();
+  rightEye.position.x = 0.1;
+  const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.03, 0.02), mouthMaterial);
+  mouth.position.set(0, -0.08, 0.25);
+  const leftCheek = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.03, 0.02), blushMaterial);
+  leftCheek.position.set(-0.14, -0.06, 0.25);
+  const rightCheek = leftCheek.clone();
+  rightCheek.position.x = 0.14;
+  head.add(skull, hairCap, fringe, leftEye, rightEye, mouth, leftCheek, rightCheek);
+  headPitch.add(head);
+
+  const label = createNameSprite(state.name);
+  label.position.set(0, 2.22, 0);
+
+  root.add(torso, shirtStripe, shirtHem, collar, leftLeg, rightLeg, leftArm, rightArm, headPitch, label);
+  root.position.set(state.x, state.y, state.z);
+  root.rotation.y = state.yaw;
+  headPitch.rotation.x = state.pitch;
+  remotePlayersLayer.add(root);
+
+  const avatar: RemoteAvatar = {
+    id: state.id,
+    name: state.name,
+    root,
+    headPitch,
+    leftArm,
+    rightArm,
+    leftLeg,
+    rightLeg,
+    heldPivot,
+    heldItemMesh: null,
+    label,
+    targetPosition: new THREE.Vector3(state.x, state.y, state.z),
+    targetYaw: state.yaw,
+    targetPitch: state.pitch,
+    heldItemId: "",
+    lastVisualPosition: new THREE.Vector3(state.x, state.y, state.z),
+    walkPhase: Math.random() * Math.PI * 2,
+  };
+  setRemoteHeldItem(avatar, state.heldItemId);
+  return avatar;
+}
+
+function setRemoteHeldItem(avatar: RemoteAvatar, token: string) {
+  if (avatar.heldItemMesh) {
+    avatar.heldPivot.remove(avatar.heldItemMesh);
+    avatar.heldItemMesh = null;
+  }
+
+  const mesh = createHeldMeshFromToken(token);
+  mesh.traverse((child) => {
+    const candidate = child as THREE.Mesh;
+    if (!candidate.isMesh) return;
+    if (candidate.material === world.material) {
+      const cloned = world.material.clone();
+      cloned.map = world.atlas;
+      candidate.material = cloned;
+    }
+  });
+  mesh.position.set(0, 0, 0);
+  mesh.scale.multiplyScalar(0.72);
+  avatar.heldPivot.add(mesh);
+  avatar.heldItemMesh = mesh;
+  avatar.heldItemId = token;
+}
+
+function removeRemotePlayer(id: string) {
+  const avatar = remotePlayers.get(id);
+  if (!avatar) return;
+  remotePlayersLayer.remove(avatar.root);
+  disposeObject3D(avatar.root);
+  remotePlayers.delete(id);
+}
+
+function clearRemotePlayers() {
+  for (const id of Array.from(remotePlayers.keys())) {
+    removeRemotePlayer(id);
+  }
+}
+
+function createNameSprite(name: string) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d")!;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+  ctx.fillRect(10, 12, 236, 40);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 24px monospace";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(name, canvas.width / 2, canvas.height / 2 + 1);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false });
+  const sprite = new THREE.Sprite(material);
+  sprite.scale.set(1.8, 0.45, 1);
+  return sprite;
+}
+
+function disposeObject3D(object: THREE.Object3D) {
+  object.traverse((child) => {
+    const withGeometry = child as { geometry?: THREE.BufferGeometry };
+    if (withGeometry.geometry) withGeometry.geometry.dispose();
+    const material = (child as { material?: THREE.Material | THREE.Material[] }).material;
+    if (Array.isArray(material)) {
+      material.forEach((entry) => {
+        const textured = entry as THREE.Material & { map?: THREE.Texture | null };
+        textured.map?.dispose();
+        entry.dispose();
+      });
+    } else if (material) {
+      const textured = material as THREE.Material & { map?: THREE.Texture | null };
+      textured.map?.dispose();
+      material.dispose();
+    }
+  });
+}
+
+function colorFromName(name: string) {
+  const hue = Math.abs(hashFromName(name)) % 360;
+  const color = new THREE.Color();
+  color.setHSL(hue / 360, 0.55, 0.58);
+  return color.getHex();
+}
+
+function createAvatarPalette(name: string) {
+  const hash = Math.abs(hashFromName(name));
+
+  const shirt = new THREE.Color(colorFromName(name));
+  shirt.getHSL(tempHslB);
+  shirt.setHSL(tempHslB.h, Math.min(0.74, tempHslB.s + 0.08), 0.52);
+
+  const pants = new THREE.Color();
+  pants.setHSL((212 + (hash % 24)) / 360, 0.44, 0.36);
+
+  const hair = new THREE.Color();
+  hair.setHSL((28 + (hash % 18)) / 360, 0.32, 0.17 + ((hash >> 3) % 6) * 0.025);
+
+  const skin = new THREE.Color();
+  skin.setHSL((24 + (hash % 14)) / 360, 0.58, 0.72 - ((hash >> 5) % 5) * 0.04);
+
+  return {
+    shirt: shirt.getHex(),
+    shirtAccent: shiftColor(shirt.getHex(), 1.22),
+    sleeve: shiftColor(shirt.getHex(), 0.82),
+    pants: pants.getHex(),
+    shoes: shiftColor(pants.getHex(), 0.5),
+    skin: skin.getHex(),
+    hair: hair.getHex(),
+  };
+}
+
+function hashFromName(name: string) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+  }
+  return hash;
+}
+
+function shiftColor(hex: number, lightnessScale: number) {
+  const color = new THREE.Color(hex);
+  color.getHSL(tempHslB);
+  color.setHSL(tempHslB.h, tempHslB.s, Math.max(0, Math.min(1, tempHslB.l * lightnessScale)));
+  return color.getHex();
+}
+
+function lerpAngle(from: number, to: number, t: number) {
+  const delta = Math.atan2(Math.sin(to - from), Math.cos(to - from));
+  return from + delta * t;
 }
