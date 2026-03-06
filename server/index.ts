@@ -35,6 +35,7 @@ interface ServerPlayer extends RemotePlayerState {
   hp: number;
   dead: boolean;
   respawnTimer: ReturnType<typeof setTimeout> | null;
+  alive: boolean; // heartbeat flag
 }
 
 const players = new Map<string, ServerPlayer>();
@@ -550,6 +551,7 @@ wss.on("connection", (ws) => {
         hp: MAX_HP,
         dead: false,
         respawnTimer: null,
+        alive: true,
       };
 
       if (bodyCollidesAt(player.x, player.y, player.z)) {
@@ -613,6 +615,11 @@ wss.on("connection", (ws) => {
     console.log(`Player left: ${player.name}#${player.id}`);
   });
 
+  ws.on("pong", () => {
+    const player = playersBySocket.get(ws);
+    if (player) player.alive = true;
+  });
+
   ws.on("error", () => {
     ws.close();
   });
@@ -627,6 +634,19 @@ setInterval(() => {
   const snapshot = Array.from(players.values()).map(playerPublicState);
   broadcast({ type: "snapshot", players: snapshot });
 }, SNAPSHOT_INTERVAL_MS);
+
+// Heartbeat: detect dead connections every 10 seconds
+setInterval(() => {
+  for (const [ws, player] of playersBySocket) {
+    if (!player.alive) {
+      console.log(`Heartbeat timeout: ${player.name}#${player.id}`);
+      ws.terminate();
+      continue;
+    }
+    player.alive = false;
+    ws.ping();
+  }
+}, 10_000);
 
 wss.on("listening", () => {
   console.log(`Cubic multiplayer server running on ws://0.0.0.0:${PORT} (${SERVER_TICK_RATE} tick/s)`);

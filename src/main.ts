@@ -1371,6 +1371,10 @@ function getPreferredServerUrl() {
   return makeSameOriginServerUrl("/ws");
 }
 
+function isLocalhost(host: string) {
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
 function buildServerCandidates(preferredUrl: string) {
   const candidates = new Set<string>();
   const preferred = normalizeServerUrl(preferredUrl);
@@ -1383,7 +1387,9 @@ function buildServerCandidates(preferredUrl: string) {
   const currentHost = normalizeWsHost(window.location.hostname || "localhost");
   candidates.add(makeServerUrlForHost(currentHost));
 
-  if (currentHost !== "localhost") {
+  // Only add localhost fallback if the page itself is served from localhost.
+  // Remote players should never try connecting to their own localhost.
+  if (isLocalhost(currentHost)) {
     candidates.add(makeServerUrlForHost("localhost"));
   }
 
@@ -1420,7 +1426,15 @@ function connectMultiplayer() {
   const ws = new WebSocket(networkState.serverUrl);
   networkState.ws = ws;
 
+  // Timeout: if connection isn't established within 4 seconds, close and try next
+  const connectTimeout = window.setTimeout(() => {
+    if (ws.readyState === WebSocket.CONNECTING) {
+      ws.close();
+    }
+  }, 4000);
+
   ws.onopen = () => {
+    window.clearTimeout(connectTimeout);
     if (networkState.ws !== ws) return;
     networkState.connecting = false;
     networkState.connected = true;
@@ -1451,6 +1465,7 @@ function connectMultiplayer() {
   };
 
   ws.onclose = () => {
+    window.clearTimeout(connectTimeout);
     if (networkState.ws !== ws) return;
     networkState.ws = null;
     networkState.connecting = false;
@@ -1483,7 +1498,7 @@ function scheduleReconnect() {
       networkState.currentServerIndex = (networkState.currentServerIndex + 1) % networkState.serverCandidates.length;
     }
     connectMultiplayer();
-  }, 2000);
+  }, 1000);
 }
 
 function handleServerMessage(message: ServerMessage) {
