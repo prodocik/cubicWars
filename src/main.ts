@@ -1107,13 +1107,13 @@ function createHud() {
   chatWrap.appendChild(chatInput);
 
   const hpBar = document.createElement("div");
-  hpBar.style.cssText = "position:absolute;bottom:52px;left:50%;transform:translateX(-50%);width:220px;height:8px;background:rgba(0,0,0,0.5);border-radius:4px;overflow:hidden";
+  hpBar.style.cssText = "position:absolute;top:80px;left:12px;width:160px;height:8px;background:rgba(0,0,0,0.5);border-radius:4px;overflow:hidden";
   const hpFill = document.createElement("div");
   hpFill.style.cssText = "width:100%;height:100%;background:#e64040;border-radius:4px;transition:width 0.2s";
   hpBar.appendChild(hpFill);
 
   const hpText = document.createElement("div");
-  hpText.style.cssText = "position:absolute;bottom:62px;left:50%;transform:translateX(-50%);font-size:11px;color:#ff8888;text-shadow:0 1px 3px rgba(0,0,0,0.8)";
+  hpText.style.cssText = "position:absolute;top:66px;left:12px;font-size:11px;color:#ff8888;text-shadow:0 1px 3px rgba(0,0,0,0.8)";
 
   const deathOverlay = document.createElement("div");
   deathOverlay.style.cssText = "position:fixed;inset:0;display:none;z-index:100;background:rgba(0,0,0,0.6);display:none;align-items:center;justify-content:center;flex-direction:column;gap:20px";
