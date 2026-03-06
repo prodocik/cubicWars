@@ -1,7 +1,7 @@
 import * as THREE from "three";
 
 export const CHUNK_SIZE = 16;
-export const WORLD_HEIGHT = 256;
+export const WORLD_HEIGHT = 128;
 export const RENDER_DISTANCE = 4;
 export const EYE_HEIGHT = 1.62;
 export const PLAYER_WIDTH = 0.6;
@@ -364,13 +364,36 @@ export class VoxelWorld {
     let faceCount = 0;
     const startX = cx * CHUNK_SIZE;
     const startZ = cz * CHUNK_SIZE;
+
+    // Find max height with blocks to avoid iterating empty air
+    let maxY = 0;
+    for (let z = -1; z <= CHUNK_SIZE; z++) {
+      for (let x = -1; x <= CHUNK_SIZE; x++) {
+        const s = this.surfaceHeight(startX + x, startZ + z) + 6; // +6 for trees
+        if (s > maxY) maxY = s;
+      }
+    }
+    // Also check edits that might be above surface
+    for (const [key] of this.edits) {
+      const parts = key.split(",");
+      const ex = Number(parts[0]);
+      const ey = Number(parts[1]);
+      const ez = Number(parts[2]);
+      if (ex >= startX - 1 && ex <= startX + CHUNK_SIZE &&
+          ez >= startZ - 1 && ez <= startZ + CHUNK_SIZE &&
+          ey > maxY) {
+        maxY = ey;
+      }
+    }
+    maxY = Math.min(maxY + 1, WORLD_HEIGHT);
+
     const sampleSize = CHUNK_SIZE + 2;
-    const blocks = new Uint8Array(sampleSize * sampleSize * WORLD_HEIGHT);
+    const blocks = new Uint8Array(sampleSize * sampleSize * maxY);
 
     const sampleIndex = (x: number, y: number, z: number) =>
       y * sampleSize * sampleSize + (z + 1) * sampleSize + (x + 1);
 
-    for (let y = 0; y < WORLD_HEIGHT; y++) {
+    for (let y = 0; y < maxY; y++) {
       for (let z = -1; z <= CHUNK_SIZE; z++) {
         for (let x = -1; x <= CHUNK_SIZE; x++) {
           blocks[sampleIndex(x, y, z)] = this.getBlock(startX + x, y, startZ + z);
@@ -378,7 +401,7 @@ export class VoxelWorld {
       }
     }
 
-    for (let y = 0; y < WORLD_HEIGHT; y++) {
+    for (let y = 0; y < maxY; y++) {
       for (let z = 0; z < CHUNK_SIZE; z++) {
         for (let x = 0; x < CHUNK_SIZE; x++) {
           const block = blocks[sampleIndex(x, y, z)];
@@ -389,7 +412,9 @@ export class VoxelWorld {
             const neighborY = y + def.dir[1];
             const neighbor = neighborY < 0 || neighborY >= WORLD_HEIGHT
               ? BlockId.Air
-              : blocks[sampleIndex(x + def.dir[0], neighborY, z + def.dir[2])];
+              : neighborY >= maxY
+                ? BlockId.Air
+                : blocks[sampleIndex(x + def.dir[0], neighborY, z + def.dir[2])];
             if (neighbor !== BlockId.Air) continue;
             pushFace(buffers, x, y, z, block, face, faceCount);
             faceCount++;
