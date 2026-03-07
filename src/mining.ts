@@ -186,7 +186,11 @@ export function updateMining(
     if (state.active) resetMining(state);
     return;
   }
-  if (!state.active) return;
+  if (!state.active) {
+    // Mouse held but not mining — try to start on whatever block is in crosshair
+    hitBlockFn();
+    return;
+  }
 
   state.timer += dt;
   if (state.timer >= MINE_INTERVAL) {
