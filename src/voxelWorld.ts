@@ -505,42 +505,91 @@ export class VoxelWorld {
 
           for (let face = 0; face < FACE_DEFS.length; face++) {
             const def = FACE_DEFS[face];
-            const neighborY = y + def.dir[1];
+            const nx = def.dir[0], ny = def.dir[1], nz = def.dir[2];
+            const neighborY = y + ny;
             const neighbor = neighborY < 0 || neighborY >= WORLD_HEIGHT
               ? BlockId.Air
               : neighborY >= maxY
                 ? BlockId.Air
-                : blocks[sampleIndex(x + def.dir[0], neighborY, z + def.dir[2])];
-
-            // Get light from the neighbor block (the space this face looks into)
-            let sl = 15, bl = 0;
-            if (neighborY >= 0 && neighborY < maxY) {
-              const ni = sampleIndex(x + def.dir[0], neighborY, z + def.dir[2]);
-              sl = skyLight[ni];
-              bl = blkLight[ni];
-            } else if (neighborY < 0) {
-              sl = 0; bl = 0;
-            }
-
-            // Calculate vertex color from light
-            const MIN_LIGHT = 0.04;
-            let r: number, g: number, b: number;
-            if (bl > sl) {
-              const t = MIN_LIGHT + (bl / 15) * (1 - MIN_LIGHT);
-              r = t; g = t * 0.82; b = t * 0.55;
-            } else {
-              const t = MIN_LIGHT + (sl / 15) * (1 - MIN_LIGHT);
-              r = t; g = t; b = t;
-            }
+                : blocks[sampleIndex(x + nx, neighborY, z + nz)];
 
             if (isWaterBlock) {
               if (neighbor !== BlockId.Air && !isTorchBlock(neighbor as BlockId)) continue;
-              pushFace(waterBuf, x, y, z, block, face, waterFaces, r, g, b);
+            } else {
+              if (neighbor !== BlockId.Air && neighbor !== BlockId.Water && !isTorchBlock(neighbor as BlockId)) continue;
+            }
+
+            // Per-vertex smooth lighting: each corner samples 4 neighboring air blocks
+            const corners = def.corners;
+            const vertColors: number[] = []; // r,g,b x4
+
+            for (let ci = 0; ci < 4; ci++) {
+              const cx = corners[ci][0], cy = corners[ci][1], cz = corners[ci][2];
+              // The 4 blocks that contribute to this vertex:
+              // 1) the face neighbor itself
+              // 2-4) three edge/corner neighbors in the face plane
+              // Offsets from the block toward the vertex, perpendicular to face normal
+              const ox1 = cx * 2 - 1; // -1 or +1 in x
+              const oy1 = cy * 2 - 1;
+              const oz1 = cz * 2 - 1;
+
+              let totalSky = 0, totalBlk = 0, count = 0;
+
+              // Sample the 4 blocks around the vertex in the air side
+              // For a face with normal (nx,ny,nz), the vertex is at corner (cx,cy,cz)
+              // We sample: face neighbor + 3 diagonal neighbors
+              const samples = [
+                [x + nx, y + ny, z + nz], // face neighbor
+              ];
+              if (nx !== 0) {
+                // face is along X axis, vary Y and Z
+                samples.push([x + nx, y + oy1, z + nz]);
+                samples.push([x + nx, y + ny, z + oz1]);
+                samples.push([x + nx, y + oy1, z + oz1]);
+              } else if (ny !== 0) {
+                // face is along Y axis, vary X and Z
+                samples.push([x + ox1, y + ny, z + nz]);
+                samples.push([x + nx, y + ny, z + oz1]);
+                samples.push([x + ox1, y + ny, z + oz1]);
+              } else {
+                // face is along Z axis, vary X and Y
+                samples.push([x + ox1, y + ny, z + nz]);
+                samples.push([x + nx, y + oy1, z + nz]);
+                samples.push([x + ox1, y + oy1, z + nz]);
+              }
+
+              for (const s of samples) {
+                const sx = s[0], sy = s[1], sz = s[2];
+                if (sy < 0) { count++; continue; }
+                if (sy >= maxY) { totalSky += 15; count++; continue; }
+                if (sx >= -1 && sx <= CHUNK_SIZE && sz >= -1 && sz <= CHUNK_SIZE) {
+                  const si = sampleIndex(sx, sy, sz);
+                  totalSky += skyLight[si];
+                  totalBlk += blkLight[si];
+                }
+                count++;
+              }
+
+              const avgSky = count > 0 ? totalSky / count : 15;
+              const avgBlk = count > 0 ? totalBlk / count : 0;
+
+              const MIN_LIGHT = 0.04;
+              let r: number, g: number, b: number;
+              if (avgBlk > avgSky) {
+                const t = MIN_LIGHT + (avgBlk / 15) * (1 - MIN_LIGHT);
+                r = t; g = t * 0.82; b = t * 0.55;
+              } else {
+                const t = MIN_LIGHT + (avgSky / 15) * (1 - MIN_LIGHT);
+                r = t; g = t; b = t;
+              }
+              vertColors.push(r, g, b);
+            }
+
+            if (isWaterBlock) {
+              pushFaceSmooth(waterBuf, x, y, z, block as BlockId, face, waterFaces, vertColors);
               waterFaces++;
             } else {
-              // Solid face against Air, Water, or Torch
-              if (neighbor !== BlockId.Air && neighbor !== BlockId.Water && !isTorchBlock(neighbor as BlockId)) continue;
-              pushFace(solidBuf, x, y, z, block, face, solidFaces, r, g, b);
+              pushFaceSmooth(solidBuf, x, y, z, block as BlockId, face, solidFaces, vertColors);
               solidFaces++;
             }
           }
@@ -912,6 +961,25 @@ function pushBox(
     fc++;
   }
   return fc;
+}
+
+function pushFaceSmooth(buffers: MeshBuffers, x: number, y: number, z: number, block: BlockId, faceIndex: number, faceCount: number, vc: number[]) {
+  const def = FACE_DEFS[faceIndex];
+  const uv = uvCache[blockFaceTile(block, faceIndex)];
+  const c = def.corners;
+  const dx = def.dir[0], dy = def.dir[1], dz = def.dir[2];
+  buffers.positions.push(
+    x + c[0][0], y + c[0][1], z + c[0][2],
+    x + c[1][0], y + c[1][1], z + c[1][2],
+    x + c[2][0], y + c[2][1], z + c[2][2],
+    x + c[3][0], y + c[3][1], z + c[3][2]
+  );
+  buffers.normals.push(dx, dy, dz, dx, dy, dz, dx, dy, dz, dx, dy, dz);
+  buffers.uvs.push(uv.u0, uv.v1, uv.u0, uv.v0, uv.u1, uv.v0, uv.u1, uv.v1);
+  // vc has 12 values: r0,g0,b0, r1,g1,b1, r2,g2,b2, r3,g3,b3
+  buffers.colors.push(vc[0],vc[1],vc[2], vc[3],vc[4],vc[5], vc[6],vc[7],vc[8], vc[9],vc[10],vc[11]);
+  const base = faceCount * 4;
+  buffers.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
 }
 
 function pushFace(buffers: MeshBuffers, x: number, y: number, z: number, block: BlockId, faceIndex: number, faceCount: number, r: number, g: number, b: number) {
