@@ -530,8 +530,8 @@ export class VoxelWorld {
 
 // --- Biome selection ---
 function sampleBiome(x: number, z: number): Biome {
-  const temperature = fbm2D(x * 0.0018, z * 0.0018, 3, 200);
-  const moisture = fbm2D(x * 0.0022, z * 0.0022, 3, 500);
+  const temperature = fbm2D(x * 0.008, z * 0.008, 3, 200);
+  const moisture = fbm2D(x * 0.01, z * 0.01, 3, 500);
 
   if (temperature < 0.32) return Biome.Snow;
   if (temperature > 0.68 && moisture < 0.38) return Biome.Desert;
