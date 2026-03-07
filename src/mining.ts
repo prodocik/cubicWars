@@ -15,7 +15,7 @@ export const BLOCK_COLORS: Record<number, number[]> = {
 
 export function getRequiredHits(block: BlockId, tool: string): number {
   if (tool === "pickaxe") {
-    if (block === BlockId.Dirt || block === BlockId.Grass || block === BlockId.Sand) return 1;
+    if (block === BlockId.Dirt || block === BlockId.Grass || block === BlockId.Sand || block === BlockId.Snow) return 1;
     if (block === BlockId.Stone) return 4;
     if (block === BlockId.Log) return 4;
     if (block === BlockId.Leaves) return 1;
