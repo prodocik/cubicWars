@@ -1,6 +1,6 @@
 import { WebSocketServer, WebSocket } from "ws";
 import Database from "better-sqlite3";
-import { BlockId, PLAYER_HEIGHT, PLAYER_RADIUS, WORLD_HEIGHT } from "../src/voxelWorld";
+import { BlockId, Biome, PLAYER_HEIGHT, PLAYER_RADIUS, WORLD_HEIGHT, WATER_LEVEL } from "../src/voxelWorld";
 import {
   DEFAULT_SERVER_PORT,
   SERVER_TICK_RATE,
@@ -315,60 +315,153 @@ function getBlock(x: number, y: number, z: number): BlockId {
   return sampleGeneratedBlock(x, y, z);
 }
 
+// --- Biome selection (must match client) ---
+const biomeCache = new Map<string, Biome>();
+
+function getBiome(x: number, z: number): Biome {
+  const key = `${x},${z}`;
+  const cached = biomeCache.get(key);
+  if (cached !== undefined) return cached;
+  const b = sampleBiome(x, z);
+  biomeCache.set(key, b);
+  return b;
+}
+
+function sampleBiome(x: number, z: number): Biome {
+  const temperature = fbm2D(x * 0.0018, z * 0.0018, 3, 200);
+  const moisture = fbm2D(x * 0.0022, z * 0.0022, 3, 500);
+
+  if (temperature < 0.32) return Biome.Snow;
+  if (temperature > 0.68 && moisture < 0.38) return Biome.Desert;
+  if (moisture > 0.62 && temperature > 0.45) return Biome.Jungle;
+  if (moisture > 0.55 && temperature >= 0.32 && temperature <= 0.55) return Biome.Swamp;
+  return Biome.Plains;
+}
+
 function sampleGeneratedBlock(x: number, y: number, z: number): BlockId {
   const bedrockHeight = 1 + Math.floor(value2D(x * 0.15, z * 0.15, 999) * 4);
   if (y < bedrockHeight) return BlockId.Bedrock;
 
   const surface = surfaceHeight(x, z);
+  const biome = getBiome(x, z);
+
   if (y > surface) {
-    return sampleTreeBlock(x, y, z);
+    if (y <= WATER_LEVEL) return BlockId.Water;
+    return sampleVegetation(x, y, z, biome);
   }
+
+  return sampleTerrain(x, y, z, surface, biome);
+}
+
+function sampleTerrain(x: number, y: number, z: number, surface: number, biome: Biome): BlockId {
+  if (biome === Biome.Desert) {
+    if (y >= surface - 5) return BlockId.Sand;
+    return BlockId.Stone;
+  }
+  if (biome === Biome.Snow) {
+    if (y === surface) return BlockId.Snow;
+    if (y >= surface - 3) return BlockId.Dirt;
+    return BlockId.Stone;
+  }
+  if (biome === Biome.Swamp) {
+    if (y === surface) return BlockId.Grass;
+    if (y >= surface - 3) return BlockId.Dirt;
+    return BlockId.Stone;
+  }
+  // Plains & Jungle - beach near water level
+  if (y === surface && surface <= WATER_LEVEL + 2) return BlockId.Sand;
   if (y === surface) return BlockId.Grass;
-  if (y >= surface - 3) return BlockId.Dirt;
+  if (y >= surface - 3) {
+    if (surface <= WATER_LEVEL + 2) return BlockId.Sand;
+    return BlockId.Dirt;
+  }
   return BlockId.Stone;
 }
 
 function surfaceHeight(x: number, z: number) {
+  const biome = getBiome(x, z);
   const continental = fbm2D(x * 0.003, z * 0.003, 4, 2) * 18;
   const hills = fbm2D(x * 0.012, z * 0.012, 3, 11) * 7;
   const detail = fbm2D(x * 0.04, z * 0.04, 2, 37) * 2;
-  const baseHeight = 64;
-  const raw = baseHeight + continental + hills + detail;
+
+  let baseHeight = 64;
+  let heightScale = 1.0;
+
+  if (biome === Biome.Desert) { baseHeight = 63; heightScale = 0.6; }
+  else if (biome === Biome.Swamp) { baseHeight = 61; heightScale = 0.3; }
+  else if (biome === Biome.Jungle) { baseHeight = 65; heightScale = 0.8; }
+  else if (biome === Biome.Snow) { baseHeight = 66; heightScale = 1.1; }
+
+  const raw = baseHeight + (continental + hills + detail) * heightScale;
   const dist = Math.sqrt(x * x + z * z);
   const spawnBlend = Math.max(0, 1 - dist / 18);
-  const flattened = lerp(raw, baseHeight, spawnBlend);
+  const flattened = lerp(raw, 64, spawnBlend);
   return Math.max(6, Math.min(WORLD_HEIGHT - 8, Math.floor(flattened)));
 }
 
-function sampleTreeBlock(x: number, y: number, z: number): BlockId {
-  for (let tz = z - 2; tz <= z + 2; tz++) {
-    for (let tx = x - 2; tx <= x + 2; tx++) {
-      if (!hasTree(tx, tz)) continue;
+function sampleVegetation(x: number, y: number, z: number, biome: Biome): BlockId {
+  if (biome === Biome.Desert) return sampleCactus(x, y, z);
+  return sampleTreeBlock(x, y, z, biome);
+}
+
+function sampleCactus(x: number, y: number, z: number): BlockId {
+  if (!hasCactus(x, z)) return BlockId.Air;
+  if (getBiome(x, z) !== Biome.Desert) return BlockId.Air;
+  const surface = surfaceHeight(x, z);
+  if (surface <= WATER_LEVEL) return BlockId.Air;
+  if (y > surface && y <= surface + 3) return BlockId.Cactus;
+  return BlockId.Air;
+}
+
+function hasCactus(x: number, z: number) {
+  if (x >= -8 && x <= 8 && z >= -8 && z <= 8) return false;
+  const r = value2D(x * 0.18 + 50, z * 0.18 - 30, 177);
+  return r > 0.82;
+}
+
+function sampleTreeBlock(x: number, y: number, z: number, biome: Biome): BlockId {
+  const searchRadius = biome === Biome.Jungle ? 3 : 2;
+  for (let tz = z - searchRadius; tz <= z + searchRadius; tz++) {
+    for (let tx = x - searchRadius; tx <= x + searchRadius; tx++) {
+      const treeBiome = getBiome(tx, tz);
+      if (treeBiome === Biome.Desert) continue;
+      if (!hasTreeForBiome(tx, tz, treeBiome)) continue;
       const surface = surfaceHeight(tx, tz);
-      const trunkTop = surface + 4;
+      if (surface <= WATER_LEVEL) continue;
+
+      const trunkHeight = treeBiome === Biome.Jungle ? 6 : treeBiome === Biome.Swamp ? 3 : 4;
+      const trunkTop = surface + trunkHeight;
+      const canopyRadius = treeBiome === Biome.Jungle ? 3 : 2;
+
       if (x === tx && z === tz && y > surface && y <= trunkTop) {
         return BlockId.Log;
       }
-      if (y >= trunkTop - 1 && y <= trunkTop + 1) {
+      const canopyBase = trunkTop - 1;
+      const canopyTop = trunkTop + (treeBiome === Biome.Jungle ? 2 : 1);
+      if (y >= canopyBase && y <= canopyTop) {
         const dx = Math.abs(x - tx);
         const dz = Math.abs(z - tz);
-        if (dx + dz <= 2) return BlockId.Leaves;
-        if (dx <= 1 && dz <= 1 && y <= trunkTop + 1) return BlockId.Leaves;
+        if (dx + dz <= canopyRadius) return BlockId.Leaves;
+        if (dx <= canopyRadius - 1 && dz <= canopyRadius - 1) return BlockId.Leaves;
       }
     }
   }
   return BlockId.Air;
 }
 
-function hasTree(x: number, z: number) {
+function hasTreeForBiome(x: number, z: number, biome: Biome) {
   if (x >= -8 && x <= 8 && z >= -8 && z <= 8) return false;
   const density = value2D(x * 0.08, z * 0.08, 71);
   const randomness = value2D(x * 0.21 + 100, z * 0.21 - 80, 113);
-  return density > 0.58 && randomness > 0.73;
+
+  if (biome === Biome.Jungle) return density > 0.38 && randomness > 0.45;
+  if (biome === Biome.Swamp) return density > 0.65 && randomness > 0.8;
+  if (biome === Biome.Snow) return density > 0.6 && randomness > 0.78;
+  return density > 0.58 && randomness > 0.73; // Plains
 }
 
 function isCollidable(block: BlockId) {
-  return block !== BlockId.Air;
+  return block !== BlockId.Air && block !== BlockId.Water;
 }
 
 function collides(minX: number, minY: number, minZ: number, maxX: number, maxY: number, maxZ: number) {

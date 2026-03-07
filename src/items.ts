@@ -19,7 +19,7 @@ export const hotbarItems: HotbarItem[] = [
   { id: "axe", label: "Axe", kind: "tool", icon: "\u{1FA93}" },
   { id: "pickaxe", label: "Pickaxe", kind: "tool", icon: "\u26CF\uFE0F" },
   { id: "bow", label: "Bow", kind: "tool", icon: "\u{1F3F9}" },
-  { id: "grass2", label: "Grass", kind: "block", block: BlockId.Grass },
+  { id: "sand", label: "Sand", kind: "block", block: BlockId.Sand },
 ];
 
 export function heldItemTokenForItem(item: HotbarItem) {
@@ -118,5 +118,8 @@ export function tileIndexForBlock(block: BlockId) {
   if (block === BlockId.Stone) return 3;
   if (block === BlockId.Log) return 4;
   if (block === BlockId.Leaves) return 6;
+  if (block === BlockId.Sand) return 8;
+  if (block === BlockId.Snow) return 10;
+  if (block === BlockId.Cactus) return 12;
   return 3;
 }

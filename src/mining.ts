@@ -8,6 +8,9 @@ export const BLOCK_COLORS: Record<number, number[]> = {
   [BlockId.Stone]: [0x808080, 0x666666, 0x999999],
   [BlockId.Log]: [0x6b4226, 0x8b5a2b, 0x503018],
   [BlockId.Leaves]: [0x3a8c30, 0x2e6d28, 0x4ca040],
+  [BlockId.Sand]: [0xe8d088, 0xdcc47a, 0xc4a858],
+  [BlockId.Snow]: [0xf0f4f8, 0xe8ecf0, 0xd0d8e0],
+  [BlockId.Cactus]: [0x2a8030, 0x308838, 0x40a048],
 };
 
 export function getRequiredHits(block: BlockId, tool: string): number {
@@ -24,10 +27,12 @@ export function getRequiredHits(block: BlockId, tool: string): number {
     if (block === BlockId.Stone) return 7;
   }
   // Hand
-  if (block === BlockId.Dirt || block === BlockId.Grass) return 5;
+  if (block === BlockId.Dirt || block === BlockId.Grass || block === BlockId.Snow) return 5;
+  if (block === BlockId.Sand) return 3;
   if (block === BlockId.Stone) return 7;
   if (block === BlockId.Log) return 4;
   if (block === BlockId.Leaves) return 2;
+  if (block === BlockId.Cactus) return 3;
   return 5;
 }
 

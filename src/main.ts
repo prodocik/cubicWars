@@ -61,10 +61,25 @@ scene.add(crackOverlay);
 
 initRemotePlayers(world);
 
+// --- Water constants ---
+const SWIM_SPEED = 2.8;
+const WATER_GRAVITY = 4;
+const WATER_BUOYANCY = 5;
+const WATER_DRAG = 0.85;
+
 // --- State ---
 const combat = createCombatState();
 const miningState = createMiningState();
 const breakParticles: BreakParticle[] = [];
+
+// Underwater overlay
+const underwaterOverlay = document.createElement("div");
+underwaterOverlay.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:15;background:rgba(20,60,140,0.35);display:none";
+document.body.appendChild(underwaterOverlay);
+const defaultBgColor = new THREE.Color("#87c7ff");
+const waterBgColor = new THREE.Color("#1a3860");
+const defaultFogColor = new THREE.Color("#87c7ff");
+const waterFogColor = new THREE.Color("#1a3860");
 
 const cameraRig = new THREE.Group();
 const cameraPitch = new THREE.Group();
@@ -228,6 +243,14 @@ function animate() {
 }
 
 // --- Player physics ---
+function isInWater(pos: THREE.Vector3) {
+  return world.isBlockInWater(Math.floor(pos.x), Math.floor(pos.y + 0.4), Math.floor(pos.z));
+}
+
+function isHeadUnderwater(pos: THREE.Vector3) {
+  return world.isBlockInWater(Math.floor(pos.x), Math.floor(pos.y + EYE_HEIGHT), Math.floor(pos.z));
+}
+
 function updatePlayer(dt: number) {
   if (player.dead) return;
 
@@ -241,6 +264,7 @@ function updatePlayer(dt: number) {
     return;
   }
 
+  const inWater = isInWater(player.position);
   player.onGround = hasGroundContact(player.position);
 
   moveInput.set(0, 0, 0);
@@ -253,7 +277,7 @@ function updatePlayer(dt: number) {
     moveInput.normalize();
     const yawMatrix = new THREE.Matrix4().makeRotationY(yaw);
     moveInput.applyMatrix4(yawMatrix);
-    const speed = MOVE_SPEED * (input.sprint ? SPRINT_MULTIPLIER : 1);
+    const speed = inWater ? SWIM_SPEED : MOVE_SPEED * (input.sprint ? SPRINT_MULTIPLIER : 1);
     player.velocity.x = moveInput.x * speed;
     player.velocity.z = moveInput.z * speed;
   } else {
@@ -261,13 +285,23 @@ function updatePlayer(dt: number) {
     player.velocity.z = 0;
   }
 
-  if (input.jumpQueued && player.onGround) {
-    player.velocity.y = JUMP_VELOCITY;
-    player.onGround = false;
+  if (inWater) {
+    // Water physics: swim up with Space, sink slowly without
+    if (input.jumpQueued || input.sprint) {
+      player.velocity.y = WATER_BUOYANCY;
+    } else {
+      player.velocity.y -= WATER_GRAVITY * dt;
+      player.velocity.y *= WATER_DRAG;
+    }
+    input.jumpQueued = false;
+  } else {
+    if (input.jumpQueued && player.onGround) {
+      player.velocity.y = JUMP_VELOCITY;
+      player.onGround = false;
+    }
+    input.jumpQueued = false;
+    player.velocity.y -= GRAVITY * dt;
   }
-  input.jumpQueued = false;
-
-  player.velocity.y -= GRAVITY * dt;
 
   moveWithSweep(player.velocity.x * dt, player.velocity.y * dt, player.velocity.z * dt);
 
@@ -276,6 +310,21 @@ function updatePlayer(dt: number) {
     player.velocity.y = 0;
   } else {
     player.onGround = false;
+  }
+
+  // Update underwater visual effect
+  const headUnderwater = isHeadUnderwater(player.position);
+  underwaterOverlay.style.display = headUnderwater ? "block" : "none";
+  if (headUnderwater) {
+    (scene.background as THREE.Color).copy(waterBgColor);
+    (scene.fog as THREE.Fog).color.copy(waterFogColor);
+    (scene.fog as THREE.Fog).near = 2;
+    (scene.fog as THREE.Fog).far = CHUNK_SIZE * 2;
+  } else {
+    (scene.background as THREE.Color).copy(defaultBgColor);
+    (scene.fog as THREE.Fog).color.copy(defaultFogColor);
+    (scene.fog as THREE.Fog).near = CHUNK_SIZE * (RENDER_DISTANCE + 1);
+    (scene.fog as THREE.Fog).far = CHUNK_SIZE * (RENDER_DISTANCE + 3);
   }
 
   if (isPositionSafe(player.position)) {

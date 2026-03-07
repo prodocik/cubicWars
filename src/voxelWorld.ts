@@ -7,6 +7,7 @@ export const EYE_HEIGHT = 1.62;
 export const PLAYER_WIDTH = 0.6;
 export const PLAYER_HEIGHT = 1.8;
 export const PLAYER_RADIUS = PLAYER_WIDTH / 2;
+export const WATER_LEVEL = 62;
 const CHUNK_BUILD_BUDGET = 2;
 const CHUNK_FADE_IN_SPEED = 3.5;
 
@@ -18,12 +19,25 @@ export enum BlockId {
   Log = 4,
   Leaves = 5,
   Bedrock = 6,
+  Sand = 7,
+  Water = 8,
+  Snow = 9,
+  Cactus = 10,
+}
+
+export enum Biome {
+  Plains = 0,
+  Desert = 1,
+  Snow = 2,
+  Jungle = 3,
+  Swamp = 4,
 }
 
 interface ChunkEntry {
   cx: number;
   cz: number;
   mesh: THREE.Mesh | null;
+  waterMesh: THREE.Mesh | null;
   dirty: boolean;
   fade: number;
 }
@@ -43,7 +57,7 @@ export interface RaycastHit {
 }
 
 const ATLAS_TILE = 16;
-const ATLAS_COLS = 8;
+const ATLAS_COLS = 16;
 const ATLAS_ROWS = 1;
 const TEXTURE_INDEX = {
   grassTop: 0,
@@ -54,65 +68,51 @@ const TEXTURE_INDEX = {
   logTop: 5,
   leaves: 6,
   bedrock: 7,
+  sand: 8,
+  water: 9,
+  snowTop: 10,
+  snowSide: 11,
+  cactusSide: 12,
+  cactusTop: 13,
+  swampGrassTop: 14,
+  swampGrassSide: 15,
 };
 
 const FACE_DEFS = [
-  {
-    dir: [1, 0, 0],
-    corners: [
-      [1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1],
-    ],
-  },
-  {
-    dir: [-1, 0, 0],
-    corners: [
-      [0, 0, 1], [0, 1, 1], [0, 1, 0], [0, 0, 0],
-    ],
-  },
-  {
-    dir: [0, 1, 0],
-    corners: [
-      [0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0],
-    ],
-  },
-  {
-    dir: [0, -1, 0],
-    corners: [
-      [0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1],
-    ],
-  },
-  {
-    dir: [0, 0, 1],
-    corners: [
-      [1, 0, 1], [1, 1, 1], [0, 1, 1], [0, 0, 1],
-    ],
-  },
-  {
-    dir: [0, 0, -1],
-    corners: [
-      [0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0],
-    ],
-  },
+  { dir: [1, 0, 0], corners: [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]] },
+  { dir: [-1, 0, 0], corners: [[0, 0, 1], [0, 1, 1], [0, 1, 0], [0, 0, 0]] },
+  { dir: [0, 1, 0], corners: [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]] },
+  { dir: [0, -1, 0], corners: [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]] },
+  { dir: [0, 0, 1], corners: [[1, 0, 1], [1, 1, 1], [0, 1, 1], [0, 0, 1]] },
+  { dir: [0, 0, -1], corners: [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]] },
 ] as const;
 
 export class VoxelWorld {
   readonly scene = new THREE.Group();
   readonly material: THREE.MeshLambertMaterial;
+  readonly waterMaterial: THREE.MeshLambertMaterial;
   readonly atlas: THREE.CanvasTexture;
 
   private chunks = new Map<string, ChunkEntry>();
   private edits = new Map<string, BlockId>();
-  private editMaxY = new Map<string, number>(); // per-chunk max edit Y
+  private editMaxY = new Map<string, number>();
   private buildQueue: string[] = [];
   private buildQueueHead = 0;
   private queued = new Set<string>();
   private targetChunkX = Number.NaN;
   private targetChunkZ = Number.NaN;
   private surfaceCache = new Map<string, number>();
+  private biomeCache = new Map<string, Biome>();
 
   constructor() {
     this.atlas = createAtlasTexture();
     this.material = new THREE.MeshLambertMaterial({ map: this.atlas });
+    this.waterMaterial = new THREE.MeshLambertMaterial({
+      map: this.atlas,
+      transparent: true,
+      opacity: 0.65,
+      depthWrite: false,
+    });
     this.scene.add(new THREE.AmbientLight(0xffffff, 0));
   }
 
@@ -140,12 +140,16 @@ export class VoxelWorld {
     }
 
     for (const chunk of this.chunks.values()) {
-      if (!chunk.mesh || chunk.fade >= 1) continue;
+      if (chunk.fade >= 1) continue;
       chunk.fade = Math.min(1, chunk.fade + dt * CHUNK_FADE_IN_SPEED);
-      const material = chunk.mesh.material as THREE.MeshLambertMaterial;
-      material.opacity = chunk.fade;
-      if (chunk.fade >= 1) {
-        material.transparent = false;
+      if (chunk.mesh) {
+        const material = chunk.mesh.material as THREE.MeshLambertMaterial;
+        material.opacity = chunk.fade;
+        if (chunk.fade >= 1) material.transparent = false;
+      }
+      if (chunk.waterMesh) {
+        const wm = chunk.waterMesh.material as THREE.MeshLambertMaterial;
+        wm.opacity = 0.65 * chunk.fade;
       }
     }
   }
@@ -155,6 +159,7 @@ export class VoxelWorld {
       for (let z = -radius; z <= radius; z++) {
         for (let x = -radius; x <= radius; x++) {
           const candidate = new THREE.Vector3(x + 0.5, this.surfaceHeight(x, z) + 1, z + 0.5);
+          if (candidate.y <= WATER_LEVEL) continue;
           if (this.canSpawnAt(candidate)) return candidate;
         }
       }
@@ -176,7 +181,6 @@ export class VoxelWorld {
   setBlock(x: number, y: number, z: number, block: BlockId) {
     if (y < 0 || y >= WORLD_HEIGHT) return;
     this.edits.set(blockKey(x, y, z), block);
-    // Track max edit Y per chunk for fast maxY lookup
     if (block !== BlockId.Air) {
       const ck = chunkKey(worldToChunk(x), worldToChunk(z));
       const prev = this.editMaxY.get(ck) ?? 0;
@@ -190,11 +194,19 @@ export class VoxelWorld {
   }
 
   isSolid(block: BlockId) {
-    return block !== BlockId.Air;
+    return block !== BlockId.Air && block !== BlockId.Water;
   }
 
   isCollidable(block: BlockId) {
-    return block !== BlockId.Air;
+    return block !== BlockId.Air && block !== BlockId.Water;
+  }
+
+  isWater(block: BlockId) {
+    return block === BlockId.Water;
+  }
+
+  isBlockInWater(x: number, y: number, z: number) {
+    return this.getBlock(x, y, z) === BlockId.Water;
   }
 
   collides(min: THREE.Vector3, max: THREE.Vector3) {
@@ -208,13 +220,10 @@ export class VoxelWorld {
     for (let y = startY; y <= endY; y++) {
       for (let z = startZ; z <= endZ; z++) {
         for (let x = startX; x <= endX; x++) {
-          if (this.isCollidable(this.getBlock(x, y, z))) {
-            return true;
-          }
+          if (this.isCollidable(this.getBlock(x, y, z))) return true;
         }
       }
     }
-
     return false;
   }
 
@@ -227,7 +236,6 @@ export class VoxelWorld {
       dir.y === 0 ? Number.POSITIVE_INFINITY : Math.abs(1 / dir.y),
       dir.z === 0 ? Number.POSITIVE_INFINITY : Math.abs(1 / dir.z)
     );
-
     const tMax = new THREE.Vector3(
       intBound(origin.x, dir.x),
       intBound(origin.y, dir.y),
@@ -241,49 +249,41 @@ export class VoxelWorld {
     for (let i = 0; i < 256 && distance <= maxDistance; i++) {
       const block = this.getBlock(current.x, current.y, current.z);
       if (this.isSolid(block)) {
-        return {
-          block: current.clone(),
-          place: previous.clone(),
-          normal: normal.clone(),
-          distance,
-        };
+        return { block: current.clone(), place: previous.clone(), normal: normal.clone(), distance };
       }
 
       previous.copy(current);
-
       if (tMax.x < tMax.y && tMax.x < tMax.z) {
-        current.x += step.x;
-        distance = tMax.x;
-        tMax.x += tDelta.x;
-        normal.set(-step.x, 0, 0);
+        current.x += step.x; distance = tMax.x; tMax.x += tDelta.x; normal.set(-step.x, 0, 0);
       } else if (tMax.y < tMax.z) {
-        current.y += step.y;
-        distance = tMax.y;
-        tMax.y += tDelta.y;
-        normal.set(0, -step.y, 0);
+        current.y += step.y; distance = tMax.y; tMax.y += tDelta.y; normal.set(0, -step.y, 0);
       } else {
-        current.z += step.z;
-        distance = tMax.z;
-        tMax.z += tDelta.z;
-        normal.set(0, 0, -step.z);
+        current.z += step.z; distance = tMax.z; tMax.z += tDelta.z; normal.set(0, 0, -step.z);
       }
     }
-
     return null;
   }
 
   createBlockPreview(block: BlockId) {
     const geometry = new THREE.BoxGeometry(0.45, 0.45, 0.45);
     applyBlockUv(geometry, block);
-    return new THREE.Mesh(geometry, this.material);
+    const mat = block === BlockId.Water ? this.waterMaterial : this.material;
+    return new THREE.Mesh(geometry, mat);
+  }
+
+  getBiome(x: number, z: number): Biome {
+    const key = `${x},${z}`;
+    const cached = this.biomeCache.get(key);
+    if (cached !== undefined) return cached;
+    const biome = sampleBiome(x, z);
+    this.biomeCache.set(key, biome);
+    return biome;
   }
 
   dispose() {
     for (const chunk of this.chunks.values()) {
-      if (chunk.mesh) {
-        this.scene.remove(chunk.mesh);
-        chunk.mesh.geometry.dispose();
-      }
+      if (chunk.mesh) { this.scene.remove(chunk.mesh); chunk.mesh.geometry.dispose(); }
+      if (chunk.waterMesh) { this.scene.remove(chunk.waterMesh); chunk.waterMesh.geometry.dispose(); }
     }
   }
 
@@ -292,41 +292,34 @@ export class VoxelWorld {
     const candidates: Array<{ cx: number; cz: number; distanceSq: number }> = [];
     for (let dz = -RENDER_DISTANCE; dz <= RENDER_DISTANCE; dz++) {
       for (let dx = -RENDER_DISTANCE; dx <= RENDER_DISTANCE; dx++) {
-        candidates.push({
-          cx: centerX + dx,
-          cz: centerZ + dz,
-          distanceSq: dx * dx + dz * dz,
-        });
+        candidates.push({ cx: centerX + dx, cz: centerZ + dz, distanceSq: dx * dx + dz * dz });
       }
     }
     candidates.sort((a, b) => a.distanceSq - b.distanceSq);
 
     for (const candidate of candidates) {
       const { cx, cz } = candidate;
-        const key = chunkKey(cx, cz);
-        wanted.add(key);
-        if (!this.chunks.has(key)) {
-          const chunk: ChunkEntry = { cx, cz, mesh: null, dirty: true, fade: 0 };
-          this.chunks.set(key, chunk);
-          this.enqueueBuild(key);
-        }
+      const key = chunkKey(cx, cz);
+      wanted.add(key);
+      if (!this.chunks.has(key)) {
+        const chunk: ChunkEntry = { cx, cz, mesh: null, waterMesh: null, dirty: true, fade: 0 };
+        this.chunks.set(key, chunk);
+        this.enqueueBuild(key);
+      }
     }
 
     for (const [key, chunk] of this.chunks) {
       if (wanted.has(key)) continue;
-      if (chunk.mesh) {
-        this.scene.remove(chunk.mesh);
-        chunk.mesh.geometry.dispose();
-        (chunk.mesh.material as THREE.Material).dispose();
-      }
+      if (chunk.mesh) { this.scene.remove(chunk.mesh); chunk.mesh.geometry.dispose(); (chunk.mesh.material as THREE.Material).dispose(); }
+      if (chunk.waterMesh) { this.scene.remove(chunk.waterMesh); chunk.waterMesh.geometry.dispose(); (chunk.waterMesh.material as THREE.Material).dispose(); }
       this.chunks.delete(key);
       this.queued.delete(key);
-      // Clear surface cache for unloaded chunk area
       const sx = chunk.cx * CHUNK_SIZE;
       const sz = chunk.cz * CHUNK_SIZE;
       for (let z = sz - 1; z <= sz + CHUNK_SIZE; z++) {
         for (let x = sx - 1; x <= sx + CHUNK_SIZE; x++) {
           this.surfaceCache.delete(`${x},${z}`);
+          this.biomeCache.delete(`${x},${z}`);
         }
       }
     }
@@ -336,7 +329,7 @@ export class VoxelWorld {
     const key = chunkKey(cx, cz);
     let chunk = this.chunks.get(key);
     if (!chunk) {
-      chunk = { cx, cz, mesh: null, dirty: true, fade: 0 };
+      chunk = { cx, cz, mesh: null, waterMesh: null, dirty: true, fade: 0 };
       this.chunks.set(key, chunk);
     }
     chunk.dirty = true;
@@ -352,52 +345,60 @@ export class VoxelWorld {
   private rebuildChunk(chunk: ChunkEntry) {
     if (!chunk.dirty && chunk.mesh) return;
 
-    const geometry = this.buildChunkGeometry(chunk.cx, chunk.cz);
-    if (!geometry) {
-      if (chunk.mesh) {
-        this.scene.remove(chunk.mesh);
-        chunk.mesh.geometry.dispose();
-        (chunk.mesh.material as THREE.Material).dispose();
-        chunk.mesh = null;
-      }
-      chunk.dirty = false;
-      return;
-    }
+    const result = this.buildChunkGeometry(chunk.cx, chunk.cz);
 
-    if (chunk.mesh) {
+    // Solid mesh
+    if (!result.solid) {
+      if (chunk.mesh) { this.scene.remove(chunk.mesh); chunk.mesh.geometry.dispose(); (chunk.mesh.material as THREE.Material).dispose(); chunk.mesh = null; }
+    } else if (chunk.mesh) {
       chunk.mesh.geometry.dispose();
-      chunk.mesh.geometry = geometry;
-      chunk.dirty = false;
-      return;
+      chunk.mesh.geometry = result.solid;
+    } else {
+      const material = this.material.clone();
+      material.map = this.atlas;
+      material.transparent = true;
+      material.opacity = chunk.fade;
+      const mesh = new THREE.Mesh(result.solid, material);
+      mesh.position.set(chunk.cx * CHUNK_SIZE, 0, chunk.cz * CHUNK_SIZE);
+      chunk.mesh = mesh;
+      this.scene.add(mesh);
     }
 
-    const material = this.material.clone();
-    material.map = this.atlas;
-    material.transparent = true;
-    material.opacity = chunk.fade;
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.set(chunk.cx * CHUNK_SIZE, 0, chunk.cz * CHUNK_SIZE);
-    mesh.matrixAutoUpdate = true;
-    chunk.mesh = mesh;
+    // Water mesh
+    if (!result.water) {
+      if (chunk.waterMesh) { this.scene.remove(chunk.waterMesh); chunk.waterMesh.geometry.dispose(); (chunk.waterMesh.material as THREE.Material).dispose(); chunk.waterMesh = null; }
+    } else if (chunk.waterMesh) {
+      chunk.waterMesh.geometry.dispose();
+      chunk.waterMesh.geometry = result.water;
+    } else {
+      const wm = this.waterMaterial.clone();
+      wm.map = this.atlas;
+      wm.opacity = 0.65 * chunk.fade;
+      const waterMesh = new THREE.Mesh(result.water, wm);
+      waterMesh.position.set(chunk.cx * CHUNK_SIZE, 0, chunk.cz * CHUNK_SIZE);
+      waterMesh.renderOrder = 1;
+      chunk.waterMesh = waterMesh;
+      this.scene.add(waterMesh);
+    }
+
     chunk.dirty = false;
-    this.scene.add(mesh);
   }
 
   private buildChunkGeometry(cx: number, cz: number) {
-    const buffers: MeshBuffers = { positions: [], normals: [], uvs: [], indices: [] };
-    let faceCount = 0;
+    const solidBuf: MeshBuffers = { positions: [], normals: [], uvs: [], indices: [] };
+    const waterBuf: MeshBuffers = { positions: [], normals: [], uvs: [], indices: [] };
+    let solidFaces = 0;
+    let waterFaces = 0;
     const startX = cx * CHUNK_SIZE;
     const startZ = cz * CHUNK_SIZE;
 
-    // Find max height with blocks to avoid iterating empty air
-    let maxY = 0;
+    let maxY = WATER_LEVEL + 1;
     for (let z = -1; z <= CHUNK_SIZE; z++) {
       for (let x = -1; x <= CHUNK_SIZE; x++) {
-        const s = this.surfaceHeight(startX + x, startZ + z) + 6; // +6 for trees
+        const s = this.surfaceHeight(startX + x, startZ + z) + 8;
         if (s > maxY) maxY = s;
       }
     }
-    // Check cached per-chunk edit maxY (check this + neighbor chunks)
     for (let dcz = -1; dcz <= 1; dcz++) {
       for (let dcx = -1; dcx <= 1; dcx++) {
         const editY = this.editMaxY.get(chunkKey(cx + dcx, cz + dcz)) ?? 0;
@@ -408,7 +409,6 @@ export class VoxelWorld {
 
     const sampleSize = CHUNK_SIZE + 2;
     const blocks = new Uint8Array(sampleSize * sampleSize * maxY);
-
     const sampleIndex = (x: number, y: number, z: number) =>
       y * sampleSize * sampleSize + (z + 1) * sampleSize + (x + 1);
 
@@ -426,6 +426,8 @@ export class VoxelWorld {
           const block = blocks[sampleIndex(x, y, z)];
           if (block === BlockId.Air) continue;
 
+          const isWaterBlock = block === BlockId.Water;
+
           for (let face = 0; face < FACE_DEFS.length; face++) {
             const def = FACE_DEFS[face];
             const neighborY = y + def.dir[1];
@@ -434,51 +436,78 @@ export class VoxelWorld {
               : neighborY >= maxY
                 ? BlockId.Air
                 : blocks[sampleIndex(x + def.dir[0], neighborY, z + def.dir[2])];
-            if (neighbor !== BlockId.Air) continue;
-            pushFace(buffers, x, y, z, block, face, faceCount);
-            faceCount++;
+
+            if (isWaterBlock) {
+              // Water face only against Air (not against other water or solids)
+              if (neighbor !== BlockId.Air) continue;
+              pushFace(waterBuf, x, y, z, block, face, waterFaces);
+              waterFaces++;
+            } else {
+              // Solid face against Air or Water
+              if (neighbor !== BlockId.Air && neighbor !== BlockId.Water) continue;
+              pushFace(solidBuf, x, y, z, block, face, solidFaces);
+              solidFaces++;
+            }
           }
         }
       }
     }
 
-    if (faceCount === 0) return null;
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(buffers.positions, 3));
-    geometry.setAttribute("normal", new THREE.Float32BufferAttribute(buffers.normals, 3));
-    geometry.setAttribute("uv", new THREE.Float32BufferAttribute(buffers.uvs, 2));
-    geometry.setIndex(buffers.indices);
-    geometry.computeBoundingSphere();
-    return geometry;
+    return {
+      solid: solidFaces > 0 ? buildGeometry(solidBuf) : null,
+      water: waterFaces > 0 ? buildGeometry(waterBuf) : null,
+    };
   }
 
   private sampleGeneratedBlock(x: number, y: number, z: number): BlockId {
-    // Bedrock floor: 1-4 uneven layers at the bottom
     const bedrockHeight = 1 + Math.floor(value2D(x * 0.15, z * 0.15, 999) * 4);
     if (y < bedrockHeight) return BlockId.Bedrock;
 
     const surface = this.surfaceHeight(x, z);
+    const biome = this.getBiome(x, z);
+
+    // Above surface: trees/cacti/water fill
     if (y > surface) {
-      return sampleTreeBlock(x, y, z, this.surfaceHeight.bind(this));
+      // Water fill below water level
+      if (y <= WATER_LEVEL) return BlockId.Water;
+      return sampleVegetation(x, y, z, biome, this.surfaceHeight.bind(this), this.getBiome.bind(this));
     }
-    if (y === surface) return BlockId.Grass;
-    if (y >= surface - 3) return BlockId.Dirt;
-    return BlockId.Stone;
+
+    // Surface and below
+    return sampleTerrain(x, y, z, surface, biome);
   }
 
   surfaceHeight(x: number, z: number) {
     const key = `${x},${z}`;
     const cached = this.surfaceCache.get(key);
     if (cached !== undefined) return cached;
+
+    const biome = this.getBiome(x, z);
     const continental = fbm2D(x * 0.003, z * 0.003, 4, 2) * 18;
     const hills = fbm2D(x * 0.012, z * 0.012, 3, 11) * 7;
     const detail = fbm2D(x * 0.04, z * 0.04, 2, 37) * 2;
-    const baseHeight = 64;
-    const raw = baseHeight + continental + hills + detail;
+
+    let baseHeight = 64;
+    let heightScale = 1.0;
+
+    if (biome === Biome.Desert) {
+      baseHeight = 63;
+      heightScale = 0.6;
+    } else if (biome === Biome.Swamp) {
+      baseHeight = 61;
+      heightScale = 0.3;
+    } else if (biome === Biome.Jungle) {
+      baseHeight = 65;
+      heightScale = 0.8;
+    } else if (biome === Biome.Snow) {
+      baseHeight = 66;
+      heightScale = 1.1;
+    }
+
+    const raw = baseHeight + (continental + hills + detail) * heightScale;
     const dist = Math.sqrt(x * x + z * z);
     const spawnBlend = Math.max(0, 1 - dist / 18);
-    const flattened = lerp(raw, baseHeight, spawnBlend);
+    const flattened = lerp(raw, 64, spawnBlend);
     const result = Math.max(6, Math.min(WORLD_HEIGHT - 8, Math.floor(flattened)));
     this.surfaceCache.set(key, result);
     return result;
@@ -495,9 +524,135 @@ export class VoxelWorld {
         if (!this.isCollidable(this.getBlock(x, belowY, z))) return false;
       }
     }
-
     return true;
   }
+}
+
+// --- Biome selection ---
+function sampleBiome(x: number, z: number): Biome {
+  const temperature = fbm2D(x * 0.0018, z * 0.0018, 3, 200);
+  const moisture = fbm2D(x * 0.0022, z * 0.0022, 3, 500);
+
+  if (temperature < 0.32) return Biome.Snow;
+  if (temperature > 0.68 && moisture < 0.38) return Biome.Desert;
+  if (moisture > 0.62 && temperature > 0.45) return Biome.Jungle;
+  if (moisture > 0.55 && temperature >= 0.32 && temperature <= 0.55) return Biome.Swamp;
+  return Biome.Plains;
+}
+
+// --- Terrain blocks ---
+function sampleTerrain(_x: number, y: number, _z: number, surface: number, biome: Biome): BlockId {
+  if (biome === Biome.Desert) {
+    if (y === surface) return BlockId.Sand;
+    if (y >= surface - 5) return BlockId.Sand;
+    return BlockId.Stone;
+  }
+  if (biome === Biome.Snow) {
+    if (y === surface) return BlockId.Snow;
+    if (y >= surface - 3) return BlockId.Dirt;
+    return BlockId.Stone;
+  }
+  if (biome === Biome.Swamp) {
+    if (y === surface) return BlockId.Grass;
+    if (y >= surface - 3) return BlockId.Dirt;
+    return BlockId.Stone;
+  }
+  // Plains & Jungle
+  // Beach: near water level, use sand
+  if (y === surface && surface <= WATER_LEVEL + 2) return BlockId.Sand;
+  if (y === surface) return BlockId.Grass;
+  if (y >= surface - 3) {
+    if (surface <= WATER_LEVEL + 2) return BlockId.Sand;
+    return BlockId.Dirt;
+  }
+  return BlockId.Stone;
+}
+
+// --- Vegetation (trees, cacti) above surface ---
+function sampleVegetation(
+  x: number, y: number, z: number, biome: Biome,
+  getSurface: (x: number, z: number) => number,
+  getBiome: (x: number, z: number) => Biome
+): BlockId {
+  if (biome === Biome.Desert) {
+    return sampleCactus(x, y, z, getSurface, getBiome);
+  }
+  return sampleTreeBlock(x, y, z, biome, getSurface, getBiome);
+}
+
+function sampleCactus(
+  x: number, y: number, z: number,
+  getSurface: (x: number, z: number) => number,
+  getBiome: (x: number, z: number) => Biome
+): BlockId {
+  if (!hasCactus(x, z)) return BlockId.Air;
+  if (getBiome(x, z) !== Biome.Desert) return BlockId.Air;
+  const surface = getSurface(x, z);
+  if (surface <= WATER_LEVEL) return BlockId.Air;
+  if (y > surface && y <= surface + 3) return BlockId.Cactus;
+  return BlockId.Air;
+}
+
+function hasCactus(x: number, z: number) {
+  if (x >= -8 && x <= 8 && z >= -8 && z <= 8) return false;
+  const r = value2D(x * 0.18 + 50, z * 0.18 - 30, 177);
+  return r > 0.82;
+}
+
+function sampleTreeBlock(
+  x: number, y: number, z: number, biome: Biome,
+  getSurface: (x: number, z: number) => number,
+  getBiome: (x: number, z: number) => Biome
+): BlockId {
+  const searchRadius = biome === Biome.Jungle ? 3 : 2;
+  for (let tz = z - searchRadius; tz <= z + searchRadius; tz++) {
+    for (let tx = x - searchRadius; tx <= x + searchRadius; tx++) {
+      const treeBiome = getBiome(tx, tz);
+      if (treeBiome === Biome.Desert) continue;
+      if (!hasTreeForBiome(tx, tz, treeBiome)) continue;
+      const surface = getSurface(tx, tz);
+      if (surface <= WATER_LEVEL) continue;
+
+      const trunkHeight = treeBiome === Biome.Jungle ? 6 : treeBiome === Biome.Swamp ? 3 : 4;
+      const trunkTop = surface + trunkHeight;
+      const canopyRadius = treeBiome === Biome.Jungle ? 3 : 2;
+
+      if (x === tx && z === tz && y > surface && y <= trunkTop) {
+        return BlockId.Log;
+      }
+      const canopyBase = trunkTop - 1;
+      const canopyTop = trunkTop + (treeBiome === Biome.Jungle ? 2 : 1);
+      if (y >= canopyBase && y <= canopyTop) {
+        const dx = Math.abs(x - tx);
+        const dz = Math.abs(z - tz);
+        if (dx + dz <= canopyRadius) return BlockId.Leaves;
+        if (dx <= canopyRadius - 1 && dz <= canopyRadius - 1) return BlockId.Leaves;
+      }
+    }
+  }
+  return BlockId.Air;
+}
+
+function hasTreeForBiome(x: number, z: number, biome: Biome) {
+  if (x >= -8 && x <= 8 && z >= -8 && z <= 8) return false;
+  const density = value2D(x * 0.08, z * 0.08, 71);
+  const randomness = value2D(x * 0.21 + 100, z * 0.21 - 80, 113);
+
+  if (biome === Biome.Jungle) return density > 0.38 && randomness > 0.45;
+  if (biome === Biome.Swamp) return density > 0.65 && randomness > 0.8;
+  if (biome === Biome.Snow) return density > 0.6 && randomness > 0.78;
+  return density > 0.58 && randomness > 0.73; // Plains
+}
+
+// --- Geometry helpers ---
+function buildGeometry(buffers: MeshBuffers) {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(buffers.positions, 3));
+  geometry.setAttribute("normal", new THREE.Float32BufferAttribute(buffers.normals, 3));
+  geometry.setAttribute("uv", new THREE.Float32BufferAttribute(buffers.uvs, 2));
+  geometry.setIndex(buffers.indices);
+  geometry.computeBoundingSphere();
+  return geometry;
 }
 
 function pushFace(buffers: MeshBuffers, x: number, y: number, z: number, block: BlockId, faceIndex: number, faceCount: number) {
@@ -508,14 +663,7 @@ function pushFace(buffers: MeshBuffers, x: number, y: number, z: number, block: 
     buffers.positions.push(x + vx, y + vy, z + vz);
     buffers.normals.push(def.dir[0], def.dir[1], def.dir[2]);
   }
-
-  buffers.uvs.push(
-    tileUv.u0, tileUv.v1,
-    tileUv.u0, tileUv.v0,
-    tileUv.u1, tileUv.v0,
-    tileUv.u1, tileUv.v1,
-  );
-
+  buffers.uvs.push(tileUv.u0, tileUv.v1, tileUv.u0, tileUv.v0, tileUv.u1, tileUv.v0, tileUv.u1, tileUv.v1);
   const base = faceCount * 4;
   buffers.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
 }
@@ -531,6 +679,14 @@ function blockFaceTile(block: BlockId, faceIndex: number) {
   if (block === BlockId.Log) return faceIndex === 2 || faceIndex === 3 ? TEXTURE_INDEX.logTop : TEXTURE_INDEX.logSide;
   if (block === BlockId.Leaves) return TEXTURE_INDEX.leaves;
   if (block === BlockId.Bedrock) return TEXTURE_INDEX.bedrock;
+  if (block === BlockId.Sand) return TEXTURE_INDEX.sand;
+  if (block === BlockId.Water) return TEXTURE_INDEX.water;
+  if (block === BlockId.Snow) {
+    if (faceIndex === 2) return TEXTURE_INDEX.snowTop;
+    if (faceIndex === 3) return TEXTURE_INDEX.dirt;
+    return TEXTURE_INDEX.snowSide;
+  }
+  if (block === BlockId.Cactus) return faceIndex === 2 || faceIndex === 3 ? TEXTURE_INDEX.cactusTop : TEXTURE_INDEX.cactusSide;
   return TEXTURE_INDEX.stone;
 }
 
@@ -548,38 +704,9 @@ function applyBlockUv(geometry: THREE.BoxGeometry, block: BlockId) {
   uv.needsUpdate = true;
 }
 
-function sampleTreeBlock(x: number, y: number, z: number, getSurface: (x: number, z: number) => number): BlockId {
-  for (let tz = z - 2; tz <= z + 2; tz++) {
-    for (let tx = x - 2; tx <= x + 2; tx++) {
-      if (!hasTree(tx, tz)) continue;
-      const surface = getSurface(tx, tz);
-      const trunkTop = surface + 4;
-      if (x === tx && z === tz && y > surface && y <= trunkTop) {
-        return BlockId.Log;
-      }
-      if (y >= trunkTop - 1 && y <= trunkTop + 1) {
-        const dx = Math.abs(x - tx);
-        const dz = Math.abs(z - tz);
-        if (dx + dz <= 2) return BlockId.Leaves;
-        if (dx <= 1 && dz <= 1 && y <= trunkTop + 1) return BlockId.Leaves;
-      }
-    }
-  }
-  return BlockId.Air;
-}
-
-function hasTree(x: number, z: number) {
-  if (x >= -8 && x <= 8 && z >= -8 && z <= 8) return false;
-  const density = value2D(x * 0.08, z * 0.08, 71);
-  const randomness = value2D(x * 0.21 + 100, z * 0.21 - 80, 113);
-  return density > 0.58 && randomness > 0.73;
-}
-
+// --- Noise functions ---
 function fbm2D(x: number, z: number, octaves: number, seed: number) {
-  let amplitude = 1;
-  let frequency = 1;
-  let sum = 0;
-  let max = 0;
+  let amplitude = 1, frequency = 1, sum = 0, max = 0;
   for (let i = 0; i < octaves; i++) {
     sum += value2D(x * frequency, z * frequency, seed + i * 101) * amplitude;
     max += amplitude;
@@ -589,22 +716,13 @@ function fbm2D(x: number, z: number, octaves: number, seed: number) {
   return sum / max;
 }
 
-function value2D(x: number, z: number, seed: number) {
-  const ix = Math.floor(x);
-  const iz = Math.floor(z);
-  const fx = x - ix;
-  const fz = z - iz;
-
-  const a = hash2(ix, iz, seed);
-  const b = hash2(ix + 1, iz, seed);
-  const c = hash2(ix, iz + 1, seed);
-  const d = hash2(ix + 1, iz + 1, seed);
-
-  const ux = smooth(fx);
-  const uz = smooth(fz);
-  const ab = lerp(a, b, ux);
-  const cd = lerp(c, d, ux);
-  return lerp(ab, cd, uz);
+export function value2D(x: number, z: number, seed: number) {
+  const ix = Math.floor(x), iz = Math.floor(z);
+  const fx = x - ix, fz = z - iz;
+  const a = hash2(ix, iz, seed), b = hash2(ix + 1, iz, seed);
+  const c = hash2(ix, iz + 1, seed), d = hash2(ix + 1, iz + 1, seed);
+  const ux = smooth(fx), uz = smooth(fz);
+  return lerp(lerp(a, b, ux), lerp(c, d, ux), uz);
 }
 
 function hash2(x: number, z: number, seed: number) {
@@ -614,29 +732,12 @@ function hash2(x: number, z: number, seed: number) {
   return (h & 0xffff) / 0xffff;
 }
 
-function smooth(t: number) {
-  return t * t * (3 - 2 * t);
-}
-
-function lerp(a: number, b: number, t: number) {
-  return a + (b - a) * t;
-}
-
-function chunkKey(cx: number, cz: number) {
-  return `${cx},${cz}`;
-}
-
-function blockKey(x: number, y: number, z: number) {
-  return `${x},${y},${z}`;
-}
-
-function worldToChunk(value: number) {
-  return Math.floor(value / CHUNK_SIZE);
-}
-
-function mod(value: number, divisor: number) {
-  return ((value % divisor) + divisor) % divisor;
-}
+function smooth(t: number) { return t * t * (3 - 2 * t); }
+function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
+function chunkKey(cx: number, cz: number) { return `${cx},${cz}`; }
+function blockKey(x: number, y: number, z: number) { return `${x},${y},${z}`; }
+function worldToChunk(value: number) { return Math.floor(value / CHUNK_SIZE); }
+function mod(value: number, divisor: number) { return ((value % divisor) + divisor) % divisor; }
 
 function intBound(s: number, ds: number) {
   if (ds === 0) return Number.POSITIVE_INFINITY;
@@ -654,6 +755,7 @@ function uvForTile(index: number) {
   return { u0, v0, u1, v1 };
 }
 
+// --- Texture atlas ---
 function createAtlasTexture() {
   const canvas = document.createElement("canvas");
   canvas.width = ATLAS_TILE * ATLAS_COLS;
@@ -669,6 +771,14 @@ function createAtlasTexture() {
   drawLogTop(ctx, 5);
   drawLeaves(ctx, 6);
   drawBedrock(ctx, 7);
+  drawSand(ctx, 8);
+  drawWater(ctx, 9);
+  drawSnowTop(ctx, 10);
+  drawSnowSide(ctx, 11);
+  drawCactusSide(ctx, 12);
+  drawCactusTop(ctx, 13);
+  drawSwampGrassTop(ctx, 14);
+  drawSwampGrassSide(ctx, 15);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.magFilter = THREE.NearestFilter;
@@ -748,16 +858,91 @@ function drawBedrock(ctx: CanvasRenderingContext2D, tile: number) {
   checker(ctx, tile, "#222226", "#141418");
   sprinkle(ctx, tile, "#0d0d10", 61, 0.2);
   sprinkle(ctx, tile, "#2a2a30", 77, 0.12);
-  // Blue crystal specks
   sprinkle(ctx, tile, "#3366cc", 83, 0.08);
   sprinkle(ctx, tile, "#5588ee", 91, 0.04);
   sprinkle(ctx, tile, "#88aaff", 97, 0.02);
   addTileRim(ctx, tile, "#2a2a34", "#0a0a0e");
 }
 
-function paintBase(ctx: CanvasRenderingContext2D, tile: number, color: string) {
-  fillTile(ctx, tile, color);
+function drawSand(ctx: CanvasRenderingContext2D, tile: number) {
+  paintBase(ctx, tile, "#e8d088");
+  checker(ctx, tile, "#dcc47a", "#f0d890");
+  sprinkle(ctx, tile, "#c4a858", 61, 0.15);
+  sprinkle(ctx, tile, "#f8e8a8", 43, 0.1);
+  addTileRim(ctx, tile, "#fff0c0", "#b09848");
 }
+
+function drawWater(ctx: CanvasRenderingContext2D, tile: number) {
+  paintBase(ctx, tile, "#3070c0");
+  checker(ctx, tile, "#2868b8", "#3878c8");
+  sprinkle(ctx, tile, "#5090e0", 53, 0.12);
+  sprinkle(ctx, tile, "#1850a0", 67, 0.08);
+  addTileRim(ctx, tile, "#60a0f0", "#184080");
+}
+
+function drawSnowTop(ctx: CanvasRenderingContext2D, tile: number) {
+  paintBase(ctx, tile, "#f0f4f8");
+  checker(ctx, tile, "#e8ecf0", "#f4f8fc");
+  sprinkle(ctx, tile, "#d0d8e0", 47, 0.08);
+  sprinkle(ctx, tile, "#ffffff", 39, 0.12);
+  addTileRim(ctx, tile, "#ffffff", "#c8d0d8");
+}
+
+function drawSnowSide(ctx: CanvasRenderingContext2D, tile: number) {
+  fillTile(ctx, tile, "#ab6325");
+  for (let y = 0; y < 5; y++) {
+    for (let x = 0; x < ATLAS_TILE; x++) {
+      ctx.fillStyle = y < 3 ? "#f0f4f8" : "#e0e4e8";
+      ctx.fillRect(tile * ATLAS_TILE + x, y, 1, 1);
+    }
+  }
+  sprinkle(ctx, tile, "#6b3210", 52, 0.21, 5);
+  sprinkle(ctx, tile, "#d9883e", 29, 0.14, 5);
+  addTileRim(ctx, tile, "#f7c06b", "#5a2a0f");
+}
+
+function drawCactusSide(ctx: CanvasRenderingContext2D, tile: number) {
+  paintBase(ctx, tile, "#2a8030");
+  checker(ctx, tile, "#308838", "#248028");
+  sprinkle(ctx, tile, "#186020", 53, 0.12);
+  sprinkle(ctx, tile, "#40a048", 67, 0.1);
+  // Spines
+  for (let y = 2; y < ATLAS_TILE; y += 4) {
+    ctx.fillStyle = "#c0d890";
+    ctx.fillRect(tile * ATLAS_TILE + 4, y, 1, 1);
+    ctx.fillRect(tile * ATLAS_TILE + 11, y + 2, 1, 1);
+  }
+  addTileRim(ctx, tile, "#48b050", "#185820");
+}
+
+function drawCactusTop(ctx: CanvasRenderingContext2D, tile: number) {
+  paintBase(ctx, tile, "#38a040");
+  checker(ctx, tile, "#30983a", "#40a848");
+  sprinkle(ctx, tile, "#60c068", 71, 0.1);
+  addTileRim(ctx, tile, "#50b858", "#288030");
+}
+
+function drawSwampGrassTop(ctx: CanvasRenderingContext2D, tile: number) {
+  paintBase(ctx, tile, "#4a7838");
+  checker(ctx, tile, "#426e32", "#52823e");
+  sprinkle(ctx, tile, "#607830", 42, 0.14);
+  sprinkle(ctx, tile, "#2a5020", 37, 0.18);
+  addTileRim(ctx, tile, "#688840", "#1e4018");
+}
+
+function drawSwampGrassSide(ctx: CanvasRenderingContext2D, tile: number) {
+  fillTile(ctx, tile, "#8b5520");
+  for (let y = 0; y < 5; y++) {
+    for (let x = 0; x < ATLAS_TILE; x++) {
+      ctx.fillStyle = y < 3 ? "#4a7838" : "#3a6830";
+      ctx.fillRect(tile * ATLAS_TILE + x, y, 1, 1);
+    }
+  }
+  sprinkle(ctx, tile, "#5a2810", 52, 0.21, 5);
+  addTileRim(ctx, tile, "#a07030", "#402010");
+}
+
+function paintBase(ctx: CanvasRenderingContext2D, tile: number, color: string) { fillTile(ctx, tile, color); }
 
 function fillTile(ctx: CanvasRenderingContext2D, tile: number, color: string) {
   ctx.fillStyle = color;
@@ -788,9 +973,7 @@ function sprinkle(ctx: CanvasRenderingContext2D, tile: number, color: string, se
   for (let y = minY; y < ATLAS_TILE; y++) {
     for (let x = 0; x < ATLAS_TILE; x++) {
       const h = hash2(tile * 31 + x, y, seed);
-      if (h < chance) {
-        ctx.fillRect(tile * ATLAS_TILE + x, y, 1, 1);
-      }
+      if (h < chance) ctx.fillRect(tile * ATLAS_TILE + x, y, 1, 1);
     }
   }
 }
