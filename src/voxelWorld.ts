@@ -1,14 +1,14 @@
 import * as THREE from "three";
 
 export const CHUNK_SIZE = 16;
-export const WORLD_HEIGHT = 128;
+export const WORLD_HEIGHT = 96;
 export const RENDER_DISTANCE = 4;
 export const EYE_HEIGHT = 1.62;
 export const PLAYER_WIDTH = 0.6;
 export const PLAYER_HEIGHT = 1.8;
 export const PLAYER_RADIUS = PLAYER_WIDTH / 2;
 export const WATER_LEVEL = 62;
-const CHUNK_BUILD_BUDGET = 2;
+const CHUNK_BUILD_BUDGET = 4;
 const CHUNK_FADE_IN_SPEED = 3.5;
 
 let worldSeed = 0;
@@ -337,14 +337,6 @@ export class VoxelWorld {
       if (chunk.waterMesh) { this.scene.remove(chunk.waterMesh); chunk.waterMesh.geometry.dispose(); (chunk.waterMesh.material as THREE.Material).dispose(); }
       this.chunks.delete(key);
       this.queued.delete(key);
-      const sx = chunk.cx * CHUNK_SIZE;
-      const sz = chunk.cz * CHUNK_SIZE;
-      for (let z = sz - 1; z <= sz + CHUNK_SIZE; z++) {
-        for (let x = sx - 1; x <= sx + CHUNK_SIZE; x++) {
-          this.surfaceCache.delete(`${x},${z}`);
-          this.biomeCache.delete(`${x},${z}`);
-        }
-      }
     }
   }
 
@@ -415,6 +407,7 @@ export class VoxelWorld {
     const startX = cx * CHUNK_SIZE;
     const startZ = cz * CHUNK_SIZE;
 
+    // Precompute surface heights for chunk + 1-block border (cached, fast on revisit)
     let maxY = WATER_LEVEL + 1;
     for (let z = -1; z <= CHUNK_SIZE; z++) {
       for (let x = -1; x <= CHUNK_SIZE; x++) {
@@ -678,15 +671,23 @@ function buildGeometry(buffers: MeshBuffers) {
   return geometry;
 }
 
+// Pre-cache UV tiles
+const uvCache: { u0: number; v0: number; u1: number; v1: number }[] = [];
+for (let i = 0; i < ATLAS_COLS * ATLAS_ROWS; i++) uvCache.push(uvForTile(i));
+
 function pushFace(buffers: MeshBuffers, x: number, y: number, z: number, block: BlockId, faceIndex: number, faceCount: number) {
   const def = FACE_DEFS[faceIndex];
-  const uvTile = blockFaceTile(block, faceIndex);
-  const tileUv = uvForTile(uvTile);
-  for (const [vx, vy, vz] of def.corners) {
-    buffers.positions.push(x + vx, y + vy, z + vz);
-    buffers.normals.push(def.dir[0], def.dir[1], def.dir[2]);
-  }
-  buffers.uvs.push(tileUv.u0, tileUv.v1, tileUv.u0, tileUv.v0, tileUv.u1, tileUv.v0, tileUv.u1, tileUv.v1);
+  const uv = uvCache[blockFaceTile(block, faceIndex)];
+  const c = def.corners;
+  const dx = def.dir[0], dy = def.dir[1], dz = def.dir[2];
+  buffers.positions.push(
+    x + c[0][0], y + c[0][1], z + c[0][2],
+    x + c[1][0], y + c[1][1], z + c[1][2],
+    x + c[2][0], y + c[2][1], z + c[2][2],
+    x + c[3][0], y + c[3][1], z + c[3][2]
+  );
+  buffers.normals.push(dx, dy, dz, dx, dy, dz, dx, dy, dz, dx, dy, dz);
+  buffers.uvs.push(uv.u0, uv.v1, uv.u0, uv.v0, uv.u1, uv.v0, uv.u1, uv.v1);
   const base = faceCount * 4;
   buffers.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
 }
