@@ -23,7 +23,7 @@ import {
   BODY_WIDTH, BODY_HEIGHT, BODY_RADIUS,
   HEAD_RADIUS, HEAD_HALF_HEIGHT,
 } from "./constants";
-import { hotbarItems, heldItemTokenForItem, createHeldMeshFromToken, getItemByBlock, saveHotbar, type HotbarItem } from "./items";
+import { hotbarItems, heldItemTokenForItem, createHeldMeshFromToken, getItemByBlock, saveHotbar, loadHotbar, type HotbarItem } from "./items";
 import { initInventory, createInventoryOverlay, isInventoryOpen, toggleInventory, closeInventory as closeInv } from "./inventory";
 import {
   createMiningState, resetMining, updateCrackOverlay, crackOverlay,
@@ -213,6 +213,17 @@ document.body.appendChild(rpgCrosshair);
 const rpgFlash = createFlashOverlay();
 document.body.appendChild(rpgFlash);
 
+function resetInventory() {
+  localStorage.removeItem("cubic.hotbar4");
+  const fresh = loadHotbar();
+  for (let i = 0; i < hotbarItems.length; i++) {
+    hotbarItems[i] = fresh[i];
+  }
+  saveHotbar(hotbarItems);
+  reRenderHotbar();
+  setHeldItem(hotbarItems[selectedSlot]);
+}
+
 function reRenderHotbar() {
   renderHotbar(hud, hotbarItems, selectedSlot, world, () => toggleInventory());
 }
@@ -239,7 +250,8 @@ const title: TitleScreenUi = createTitleScreen(
   },
   () => renderer.domElement.requestPointerLock(),
   () => startRegenVote(),
-  () => teleportToSpawn()
+  () => teleportToSpawn(),
+  () => resetInventory()
 );
 document.body.appendChild(title.overlay);
 document.body.appendChild(hud.voteOverlay);

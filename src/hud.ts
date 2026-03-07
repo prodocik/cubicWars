@@ -239,6 +239,7 @@ export interface TitleScreenUi {
   button: HTMLButtonElement;
   regenButton: HTMLButtonElement;
   spawnButton: HTMLButtonElement;
+  resetInvButton: HTMLButtonElement;
   note: HTMLDivElement;
 }
 
@@ -247,7 +248,8 @@ export function createTitleScreen(
   onStart: (playerName: string, serverUrl: string) => void,
   requestPointerLock: () => void,
   onRegenerate?: () => void,
-  onTeleportSpawn?: () => void
+  onTeleportSpawn?: () => void,
+  onResetInventory?: () => void
 ): TitleScreenUi {
   const overlay = document.createElement("div");
   overlay.style.cssText = "position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at top,#284664 0%,#0b1118 62%);z-index:30;font-family:monospace;color:#fff";
@@ -303,14 +305,22 @@ export function createTitleScreen(
     requestPointerLock();
   };
 
+  const resetInvButton = document.createElement("button");
+  resetInvButton.textContent = "Сброс инвентаря";
+  resetInvButton.style.cssText = "padding:12px 18px;width:100%;border:none;border-radius:12px;background:linear-gradient(135deg,#808030,#606020);color:#fff;font:600 14px monospace;cursor:pointer;margin-top:6px;display:none";
+  resetInvButton.onclick = () => {
+    if (onResetInventory) onResetInventory();
+    requestPointerLock();
+  };
+
   const note = document.createElement("div");
   note.textContent = "\u0414\u0440\u0443\u0433\u0438\u0435 \u0438\u0433\u0440\u043E\u043A\u0438 \u0432\u0438\u0434\u043D\u044B \u043A\u0430\u043A 3D-\u0430\u0432\u0430\u0442\u0430\u0440\u044B. \u041B\u043E\u043C\u0430\u043D\u0438\u0435 \u0438 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043A\u0430 \u0431\u043B\u043E\u043A\u043E\u0432 \u0441\u0438\u043D\u0445\u0440\u043E\u043D\u0438\u0437\u0438\u0440\u0443\u044E\u0442\u0441\u044F \u0447\u0435\u0440\u0435\u0437 \u0441\u0435\u0440\u0432\u0435\u0440.";
   note.style.cssText = "margin-top:14px;font-size:11px;color:#9fb0bd";
 
   form.append(nameInput, serverInput);
-  box.append(titleEl, subtitle, form, button, regenButton, spawnButton, note);
+  box.append(titleEl, subtitle, form, button, regenButton, spawnButton, resetInvButton, note);
   overlay.appendChild(box);
-  return { overlay, subtitle, form, nameInput, serverInput, button, regenButton, spawnButton, note };
+  return { overlay, subtitle, form, nameInput, serverInput, button, regenButton, spawnButton, resetInvButton, note };
 }
 
 export function updateTitleScreen(
@@ -344,6 +354,7 @@ export function updateTitleScreen(
     title.serverInput.disabled = false;
     title.button.textContent = "Start Multiplayer";
     title.regenButton.style.display = "none";
+    title.resetInvButton.style.display = "none";
     title.note.textContent = "\u0414\u0440\u0443\u0433\u0438\u0435 \u0438\u0433\u0440\u043E\u043A\u0438 \u0432\u0438\u0434\u043D\u044B \u043A\u0430\u043A 3D-\u0430\u0432\u0430\u0442\u0430\u0440\u044B. \u041B\u043E\u043C\u0430\u043D\u0438\u0435 \u0438 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043A\u0430 \u0431\u043B\u043E\u043A\u043E\u0432 \u0441\u0438\u043D\u0445\u0440\u043E\u043D\u0438\u0437\u0438\u0440\u0443\u044E\u0442\u0441\u044F \u0447\u0435\u0440\u0435\u0437 \u0441\u0435\u0440\u0432\u0435\u0440.";
     return;
   }
@@ -354,6 +365,7 @@ export function updateTitleScreen(
   title.button.textContent = "Resume";
   title.regenButton.style.display = connected ? "block" : "none";
   title.spawnButton.style.display = connected ? "block" : "none";
+  title.resetInvButton.style.display = "block";
   const reconnecting = connecting || Boolean(reconnectTimer);
   title.subtitle.textContent = connected
     ? "\u0421\u0435\u0441\u0441\u0438\u044F \u0430\u043A\u0442\u0438\u0432\u043D\u0430. \u041F\u043E\u0442\u0435\u0440\u044F \u0444\u043E\u043A\u0443\u0441\u0430 \u0431\u043E\u043B\u044C\u0448\u0435 \u043D\u0435 \u043F\u0435\u0440\u0435\u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0430\u0435\u0442 \u0442\u0435\u0431\u044F \u043A \u0441\u0435\u0440\u0432\u0435\u0440\u0443."
