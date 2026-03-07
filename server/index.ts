@@ -7,12 +7,14 @@ import {
   type BlockEditState,
   type ChatMessage,
   type ClientMessage,
+  type CastVoteMessage,
   type HitPlayerMessage,
   type JoinMessage,
   type PlayerStateMessage,
   type RemotePlayerState,
   type SetBlockMessage,
   type ShootArrowMessage,
+  type StartVoteMessage,
 } from "../src/multiplayerProtocol";
 
 const PORT = Number(process.env.PORT) || DEFAULT_SERVER_PORT;
@@ -42,6 +44,16 @@ const players = new Map<string, ServerPlayer>();
 const playersBySocket = new Map<WebSocket, ServerPlayer>();
 const blockEdits = new Map<string, number>();
 let nextPlayerId = 1;
+
+// --- Vote state ---
+const VOTE_DURATION_MS = 30_000;
+let voteActive = false;
+let voteInitiator = "";
+let voteYes = new Set<string>();
+let voteNo = new Set<string>();
+let voteTimer: ReturnType<typeof setTimeout> | null = null;
+let voteCountdownInterval: ReturnType<typeof setInterval> | null = null;
+let voteStartTime = 0;
 
 // --- SQLite persistence ---
 const DB_PATH = process.env.DB_PATH || "world.db";
@@ -152,6 +164,16 @@ function isShootArrowMessage(raw: unknown): raw is ShootArrowMessage {
 function isHitPlayerMessage(raw: unknown): raw is HitPlayerMessage {
   if (!raw || typeof raw !== "object") return false;
   return (raw as Record<string, unknown>).type === "hit_player";
+}
+
+function isStartVoteMessage(raw: unknown): raw is StartVoteMessage {
+  if (!raw || typeof raw !== "object") return false;
+  return (raw as Record<string, unknown>).type === "start_vote";
+}
+
+function isCastVoteMessage(raw: unknown): raw is CastVoteMessage {
+  if (!raw || typeof raw !== "object") return false;
+  return (raw as Record<string, unknown>).type === "cast_vote";
 }
 
 function playerPublicState(player: ServerPlayer): RemotePlayerState {
@@ -303,6 +325,101 @@ function handleHitPlayer(attacker: ServerPlayer, msg: HitPlayerMessage) {
         x: target.x, y: target.y, z: target.z,
       });
     }, RESPAWN_DELAY_MS);
+  }
+}
+
+function handleStartVote(player: ServerPlayer) {
+  if (voteActive) {
+    sendTo(player.ws, { type: "chat", id: "", name: "Server", text: "Голосование уже идёт!" });
+    return;
+  }
+  if (players.size < 1) return;
+
+  voteActive = true;
+  voteInitiator = player.name;
+  voteYes = new Set<string>([player.id]); // initiator auto-votes yes
+  voteNo = new Set<string>();
+  voteStartTime = Date.now();
+
+  broadcast({
+    type: "vote_started",
+    initiator: player.name,
+    duration: VOTE_DURATION_MS,
+    yes: voteYes.size,
+    no: voteNo.size,
+    total: players.size,
+  });
+
+  // Send countdown updates every second
+  voteCountdownInterval = setInterval(() => {
+    const timeLeft = Math.max(0, VOTE_DURATION_MS - (Date.now() - voteStartTime));
+    broadcast({
+      type: "vote_update",
+      yes: voteYes.size,
+      no: voteNo.size,
+      total: players.size,
+      timeLeft,
+    });
+  }, 1000);
+
+  // End vote after duration
+  voteTimer = setTimeout(() => resolveVote(), VOTE_DURATION_MS);
+}
+
+function handleCastVote(player: ServerPlayer, msg: CastVoteMessage) {
+  if (!voteActive) return;
+  if (voteYes.has(player.id) || voteNo.has(player.id)) return; // already voted
+
+  if (msg.vote === "yes") {
+    voteYes.add(player.id);
+  } else {
+    voteNo.add(player.id);
+  }
+
+  // Broadcast updated counts
+  const timeLeft = Math.max(0, VOTE_DURATION_MS - (Date.now() - voteStartTime));
+  broadcast({
+    type: "vote_update",
+    yes: voteYes.size,
+    no: voteNo.size,
+    total: players.size,
+    timeLeft,
+  });
+
+  // If everyone voted, resolve early
+  if (voteYes.size + voteNo.size >= players.size) {
+    resolveVote();
+  }
+}
+
+function resolveVote() {
+  if (!voteActive) return;
+  if (voteTimer) { clearTimeout(voteTimer); voteTimer = null; }
+  if (voteCountdownInterval) { clearInterval(voteCountdownInterval); voteCountdownInterval = null; }
+
+  const passed = voteYes.size > voteNo.size;
+  broadcast({ type: "vote_result", passed, yes: voteYes.size, no: voteNo.size });
+  voteActive = false;
+
+  if (passed) {
+    // Wait a moment for clients to see the result, then reset
+    setTimeout(() => resetWorld(), 2000);
+  }
+}
+
+function resetWorld() {
+  // Clear all block edits from memory and DB
+  blockEdits.clear();
+  db.exec("DELETE FROM block_edits");
+  biomeCache.clear();
+  console.log("World reset: cleared all block edits");
+
+  // Broadcast world_reset — clients will disconnect and reconnect
+  broadcast({ type: "world_reset" });
+
+  // Kick all players so they reconnect to a fresh world
+  for (const [ws] of playersBySocket) {
+    ws.close();
   }
 }
 
@@ -694,6 +811,16 @@ wss.on("connection", (ws) => {
 
     if (isHitPlayerMessage(message)) {
       handleHitPlayer(player, message);
+      return;
+    }
+
+    if (isStartVoteMessage(message)) {
+      handleStartVote(player);
+      return;
+    }
+
+    if (isCastVoteMessage(message)) {
+      handleCastVote(player, message);
     }
   });
 
@@ -706,6 +833,18 @@ wss.on("connection", (ws) => {
     players.delete(player.id);
     broadcast({ type: "player_leave", id: player.id }, player.id);
     console.log(`Player left: ${player.name}#${player.id}`);
+
+    // Clean up vote if active
+    if (voteActive) {
+      voteYes.delete(player.id);
+      voteNo.delete(player.id);
+      // If no players left, cancel vote
+      if (players.size === 0) {
+        if (voteTimer) { clearTimeout(voteTimer); voteTimer = null; }
+        if (voteCountdownInterval) { clearInterval(voteCountdownInterval); voteCountdownInterval = null; }
+        voteActive = false;
+      }
+    }
   });
 
   ws.on("pong", () => {

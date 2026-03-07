@@ -66,6 +66,15 @@ export interface HitPlayerMessage {
   targetId: string;
 }
 
+export interface StartVoteMessage {
+  type: "start_vote";
+}
+
+export interface CastVoteMessage {
+  type: "cast_vote";
+  vote: "yes" | "no";
+}
+
 export interface InitMessage {
   type: "init";
   id: string;
@@ -131,13 +140,43 @@ export interface RespawnBroadcast {
   x: number; y: number; z: number;
 }
 
+export interface VoteStartedBroadcast {
+  type: "vote_started";
+  initiator: string;
+  duration: number;
+  yes: number;
+  no: number;
+  total: number;
+}
+
+export interface VoteUpdateBroadcast {
+  type: "vote_update";
+  yes: number;
+  no: number;
+  total: number;
+  timeLeft: number;
+}
+
+export interface VoteResultBroadcast {
+  type: "vote_result";
+  passed: boolean;
+  yes: number;
+  no: number;
+}
+
+export interface WorldResetBroadcast {
+  type: "world_reset";
+}
+
 export type ClientMessage =
   | JoinMessage
   | PlayerStateMessage
   | SetBlockMessage
   | ChatMessage
   | ShootArrowMessage
-  | HitPlayerMessage;
+  | HitPlayerMessage
+  | StartVoteMessage
+  | CastVoteMessage;
 
 export type ServerMessage =
   | InitMessage
@@ -149,4 +188,8 @@ export type ServerMessage =
   | ShootArrowBroadcast
   | DamageBroadcast
   | DeathBroadcast
-  | RespawnBroadcast;
+  | RespawnBroadcast
+  | VoteStartedBroadcast
+  | VoteUpdateBroadcast
+  | VoteResultBroadcast
+  | WorldResetBroadcast;

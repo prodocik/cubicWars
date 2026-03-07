@@ -196,9 +196,16 @@ const title: TitleScreenUi = createTitleScreen(
     localStorage.setItem("cubic.serverUrl", url);
     startMultiplayer(playerName, url);
   },
-  () => renderer.domElement.requestPointerLock()
+  () => renderer.domElement.requestPointerLock(),
+  () => startRegenVote()
 );
 document.body.appendChild(title.overlay);
+document.body.appendChild(hud.voteOverlay);
+
+let voteHasVoted = false;
+hud.voteYesBtn.onclick = () => castVote("yes");
+hud.voteNoBtn.onclick = () => castVote("no");
+
 refreshTitleScreen();
 
 wireInput();
@@ -757,6 +764,40 @@ function wireInput() {
   window.addEventListener("contextmenu", (event) => event.preventDefault());
 }
 
+// --- Vote system ---
+function startRegenVote() {
+  if (!networkState.connected || !networkState.ws || networkState.ws.readyState !== WebSocket.OPEN) {
+    gameLog.warn("Нужно подключение к серверу для голосования.");
+    return;
+  }
+  networkState.ws.send(JSON.stringify({ type: "start_vote" }));
+}
+
+function castVote(vote: "yes" | "no") {
+  if (voteHasVoted) return;
+  if (!networkState.connected || !networkState.ws || networkState.ws.readyState !== WebSocket.OPEN) return;
+  voteHasVoted = true;
+  networkState.ws.send(JSON.stringify({ type: "cast_vote", vote }));
+  hud.voteYesBtn.disabled = true;
+  hud.voteNoBtn.disabled = true;
+  hud.voteStatus.textContent = vote === "yes" ? "Вы проголосовали: За" : "Вы проголосовали: Против";
+}
+
+function showVoteOverlay(initiator: string, yes: number, no: number, total: number, timeLeft: number) {
+  hud.voteOverlay.style.display = "flex";
+  hud.voteTitle.textContent = `${initiator} предлагает перегенерировать мир`;
+  hud.voteCountdown.textContent = `${Math.ceil(timeLeft / 1000)}`;
+  hud.voteCounts.textContent = `За: ${yes}  |  Против: ${no}  |  Всего: ${total}`;
+}
+
+function hideVoteOverlay() {
+  hud.voteOverlay.style.display = "none";
+  hud.voteYesBtn.disabled = false;
+  hud.voteNoBtn.disabled = false;
+  hud.voteStatus.textContent = "";
+  voteHasVoted = false;
+}
+
 // --- Networking ---
 function startMultiplayer(playerName: string, serverUrl: string) {
   networkState.started = true;
@@ -925,6 +966,33 @@ function handleServerMessage(message: ServerMessage) {
           avatar.lastVisualPosition.set(message.x, message.y, message.z);
         }
       }
+      break;
+    case "vote_started": {
+      const isInitiator = message.initiator === networkState.playerName;
+      voteHasVoted = isInitiator;
+      hud.voteYesBtn.disabled = isInitiator;
+      hud.voteNoBtn.disabled = isInitiator;
+      hud.voteStatus.textContent = isInitiator ? "Вы инициировали голосование (За)" : "";
+      showVoteOverlay(message.initiator, message.yes, message.no, message.total, message.duration);
+      gameLog.system(`${message.initiator} начал голосование за перегенерацию мира!`);
+      break;
+    }
+    case "vote_update":
+      hud.voteCountdown.textContent = `${Math.ceil(message.timeLeft / 1000)}`;
+      hud.voteCounts.textContent = `За: ${message.yes}  |  Против: ${message.no}  |  Всего: ${message.total}`;
+      break;
+    case "vote_result":
+      if (message.passed) {
+        gameLog.success(`Голосование прошло! (За: ${message.yes}, Против: ${message.no}) Мир перегенерируется...`);
+      } else {
+        gameLog.warn(`Голосование не прошло. (За: ${message.yes}, Против: ${message.no})`);
+      }
+      hideVoteOverlay();
+      break;
+    case "world_reset":
+      gameLog.system("Мир перегенерирован! Переподключение...");
+      hideVoteOverlay();
+      world.resetAllEdits();
       break;
   }
 }

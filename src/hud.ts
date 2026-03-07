@@ -17,6 +17,13 @@ export interface HudElements {
   hpText: HTMLDivElement;
   deathOverlay: HTMLDivElement;
   deathTimer: HTMLDivElement;
+  voteOverlay: HTMLDivElement;
+  voteTitle: HTMLDivElement;
+  voteCountdown: HTMLDivElement;
+  voteCounts: HTMLDivElement;
+  voteYesBtn: HTMLButtonElement;
+  voteNoBtn: HTMLButtonElement;
+  voteStatus: HTMLDivElement;
 }
 
 export function createHud(): HudElements {
@@ -85,10 +92,47 @@ export function createHud(): HudElements {
   deathTimer.style.cssText = "font-size:22px;color:#ccc;font-family:monospace";
   deathOverlay.append(deathTitle, deathTimer);
 
+  // Vote overlay
+  const voteOverlay = document.createElement("div");
+  voteOverlay.style.cssText = "position:fixed;inset:0;display:none;z-index:90;background:rgba(0,0,0,0.7);align-items:center;justify-content:center;flex-direction:column;gap:16px;font-family:monospace;color:#fff;pointer-events:auto";
+
+  const voteBox = document.createElement("div");
+  voteBox.style.cssText = "padding:32px 40px;border-radius:18px;background:rgba(10,14,20,0.95);border:1px solid rgba(255,255,255,0.15);box-shadow:0 20px 60px rgba(0,0,0,0.5);display:flex;flex-direction:column;align-items:center;gap:14px;min-width:340px";
+
+  const voteTitle = document.createElement("div");
+  voteTitle.style.cssText = "font-size:22px;font-weight:bold;color:#f0d050";
+  voteTitle.textContent = "Перегенерация мира";
+
+  const voteCountdown = document.createElement("div");
+  voteCountdown.style.cssText = "font-size:36px;font-weight:bold;color:#fff";
+
+  const voteCounts = document.createElement("div");
+  voteCounts.style.cssText = "font-size:16px;color:#b0c0d0;display:flex;gap:24px";
+
+  const voteBtns = document.createElement("div");
+  voteBtns.style.cssText = "display:flex;gap:16px;margin-top:4px";
+
+  const btnStyle = "padding:12px 32px;border:none;border-radius:10px;font:600 16px monospace;cursor:pointer;color:#fff;min-width:100px";
+  const voteYesBtn = document.createElement("button");
+  voteYesBtn.textContent = "За";
+  voteYesBtn.style.cssText = btnStyle + ";background:#4a9e4a";
+
+  const voteNoBtn = document.createElement("button");
+  voteNoBtn.textContent = "Против";
+  voteNoBtn.style.cssText = btnStyle + ";background:#c04040";
+
+  voteBtns.append(voteYesBtn, voteNoBtn);
+
+  const voteStatus = document.createElement("div");
+  voteStatus.style.cssText = "font-size:13px;color:#8898a8;margin-top:4px";
+
+  voteBox.append(voteTitle, voteCountdown, voteCounts, voteBtns, voteStatus);
+  voteOverlay.appendChild(voteBox);
+
   info.append(coords, chunk, status);
   root.append(crosshair, info, hint, hotbar, chatWrap, hpBar, hpText);
 
-  return { root, coords, chunk, status, hint, hotbar, chatWrap, chatInput, hpFill, hpText, deathOverlay, deathTimer };
+  return { root, coords, chunk, status, hint, hotbar, chatWrap, chatInput, hpFill, hpText, deathOverlay, deathTimer, voteOverlay, voteTitle, voteCountdown, voteCounts, voteYesBtn, voteNoBtn, voteStatus };
 }
 
 export function renderHotbar(hud: HudElements, selectedSlot: number, world: VoxelWorld) {
@@ -157,13 +201,15 @@ export interface TitleScreenUi {
   nameInput: HTMLInputElement;
   serverInput: HTMLInputElement;
   button: HTMLButtonElement;
+  regenButton: HTMLButtonElement;
   note: HTMLDivElement;
 }
 
 export function createTitleScreen(
   defaultServerUrl: string,
   onStart: (playerName: string, serverUrl: string) => void,
-  requestPointerLock: () => void
+  requestPointerLock: () => void,
+  onRegenerate?: () => void
 ): TitleScreenUi {
   const overlay = document.createElement("div");
   overlay.style.cssText = "position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at top,#284664 0%,#0b1118 62%);z-index:30;font-family:monospace;color:#fff";
@@ -203,14 +249,22 @@ export function createTitleScreen(
     requestPointerLock();
   };
 
+  const regenButton = document.createElement("button");
+  regenButton.textContent = "Перегенерировать мир";
+  regenButton.style.cssText = "padding:12px 18px;width:100%;border:none;border-radius:12px;background:linear-gradient(135deg,#c05030,#a03020);color:#fff;font:600 14px monospace;cursor:pointer;margin-top:6px;display:none";
+  regenButton.onclick = () => {
+    if (onRegenerate) onRegenerate();
+    requestPointerLock();
+  };
+
   const note = document.createElement("div");
   note.textContent = "\u0414\u0440\u0443\u0433\u0438\u0435 \u0438\u0433\u0440\u043E\u043A\u0438 \u0432\u0438\u0434\u043D\u044B \u043A\u0430\u043A 3D-\u0430\u0432\u0430\u0442\u0430\u0440\u044B. \u041B\u043E\u043C\u0430\u043D\u0438\u0435 \u0438 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043A\u0430 \u0431\u043B\u043E\u043A\u043E\u0432 \u0441\u0438\u043D\u0445\u0440\u043E\u043D\u0438\u0437\u0438\u0440\u0443\u044E\u0442\u0441\u044F \u0447\u0435\u0440\u0435\u0437 \u0441\u0435\u0440\u0432\u0435\u0440.";
   note.style.cssText = "margin-top:14px;font-size:11px;color:#9fb0bd";
 
   form.append(nameInput, serverInput);
-  box.append(titleEl, subtitle, form, button, note);
+  box.append(titleEl, subtitle, form, button, regenButton, note);
   overlay.appendChild(box);
-  return { overlay, subtitle, form, nameInput, serverInput, button, note };
+  return { overlay, subtitle, form, nameInput, serverInput, button, regenButton, note };
 }
 
 export function updateTitleScreen(
@@ -243,6 +297,7 @@ export function updateTitleScreen(
     title.nameInput.disabled = false;
     title.serverInput.disabled = false;
     title.button.textContent = "Start Multiplayer";
+    title.regenButton.style.display = "none";
     title.note.textContent = "\u0414\u0440\u0443\u0433\u0438\u0435 \u0438\u0433\u0440\u043E\u043A\u0438 \u0432\u0438\u0434\u043D\u044B \u043A\u0430\u043A 3D-\u0430\u0432\u0430\u0442\u0430\u0440\u044B. \u041B\u043E\u043C\u0430\u043D\u0438\u0435 \u0438 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043A\u0430 \u0431\u043B\u043E\u043A\u043E\u0432 \u0441\u0438\u043D\u0445\u0440\u043E\u043D\u0438\u0437\u0438\u0440\u0443\u044E\u0442\u0441\u044F \u0447\u0435\u0440\u0435\u0437 \u0441\u0435\u0440\u0432\u0435\u0440.";
     return;
   }
@@ -251,6 +306,7 @@ export function updateTitleScreen(
   title.nameInput.disabled = true;
   title.serverInput.disabled = true;
   title.button.textContent = "Resume";
+  title.regenButton.style.display = connected ? "block" : "none";
   const reconnecting = connecting || Boolean(reconnectTimer);
   title.subtitle.textContent = connected
     ? "\u0421\u0435\u0441\u0441\u0438\u044F \u0430\u043A\u0442\u0438\u0432\u043D\u0430. \u041F\u043E\u0442\u0435\u0440\u044F \u0444\u043E\u043A\u0443\u0441\u0430 \u0431\u043E\u043B\u044C\u0448\u0435 \u043D\u0435 \u043F\u0435\u0440\u0435\u043F\u043E\u0434\u043A\u043B\u044E\u0447\u0430\u0435\u0442 \u0442\u0435\u0431\u044F \u043A \u0441\u0435\u0440\u0432\u0435\u0440\u0443."

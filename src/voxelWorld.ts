@@ -193,6 +193,19 @@ export class VoxelWorld {
     if (mod(z, CHUNK_SIZE) === CHUNK_SIZE - 1) this.markChunkDirty(worldToChunk(x), worldToChunk(z + 1));
   }
 
+  resetAllEdits() {
+    this.edits.clear();
+    this.editMaxY.clear();
+    // Mark all loaded chunks dirty so they rebuild from procedural generation
+    for (const chunk of this.chunks.values()) {
+      chunk.dirty = true;
+      if (!this.queued.has(chunkKey(chunk.cx, chunk.cz))) {
+        this.buildQueue.push(chunkKey(chunk.cx, chunk.cz));
+        this.queued.add(chunkKey(chunk.cx, chunk.cz));
+      }
+    }
+  }
+
   isSolid(block: BlockId) {
     return block !== BlockId.Air && block !== BlockId.Water;
   }
