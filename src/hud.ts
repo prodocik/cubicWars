@@ -2,7 +2,8 @@ import * as THREE from "three";
 import { MAX_CHAT_LENGTH, MAX_HP } from "./constants";
 import { CHUNK_SIZE } from "./voxelWorld";
 import type { VoxelWorld } from "./voxelWorld";
-import { hotbarItems, tileIndexForBlock } from "./items";
+import { tileIndexForBlock } from "./items";
+import type { HotbarItem } from "./items";
 
 export interface HudElements {
   root: HTMLDivElement;
@@ -48,10 +49,10 @@ export function createHud(): HudElements {
 
   const hint = document.createElement("div");
   hint.style.cssText = "position:absolute;left:50%;bottom:88px;transform:translateX(-50%);padding:6px 10px;border-radius:10px;background:rgba(0,0,0,0.38);font-size:12px;color:#deedde";
-  hint.textContent = "WASD move, Space jump, Enter chat, LMB mine (hold), RMB place, wheel or 1-9 select";
+  hint.textContent = "WASD move, Space jump, E inventory, Enter chat, LMB mine, RMB place, 1-9 select";
 
   const hotbar = document.createElement("div");
-  hotbar.style.cssText = "position:absolute;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:6px;pointer-events:none";
+  hotbar.style.cssText = "position:absolute;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:6px;align-items:center;pointer-events:none";
 
   const chatWrap = document.createElement("div");
   chatWrap.style.cssText = "position:absolute;left:50%;bottom:150px;transform:translateX(-50%);display:none;pointer-events:auto";
@@ -135,10 +136,10 @@ export function createHud(): HudElements {
   return { root, coords, chunk, status, hint, hotbar, chatWrap, chatInput, hpFill, hpText, deathOverlay, deathTimer, voteOverlay, voteTitle, voteCountdown, voteCounts, voteYesBtn, voteNoBtn, voteStatus };
 }
 
-export function renderHotbar(hud: HudElements, selectedSlot: number, world: VoxelWorld) {
+export function renderHotbar(hud: HudElements, slots: (HotbarItem | null)[], selectedSlot: number, world: VoxelWorld, onOpenInventory?: () => void) {
   hud.hotbar.innerHTML = "";
-  for (let i = 0; i < hotbarItems.length; i++) {
-    const item = hotbarItems[i];
+  for (let i = 0; i < slots.length; i++) {
+    const item = slots[i];
     const slot = document.createElement("div");
     slot.style.cssText = [
       "width:58px;height:58px;border-radius:10px;display:flex;align-items:center;justify-content:center;position:relative",
@@ -146,11 +147,11 @@ export function renderHotbar(hud: HudElements, selectedSlot: number, world: Voxe
     ].join(";");
 
     const key = document.createElement("span");
-    key.textContent = String((i + 1) % 10 || 0);
+    key.textContent = String((i + 1) % 10);
     key.style.cssText = "position:absolute;top:3px;left:5px;font-size:9px;color:#9db0bc";
     slot.appendChild(key);
 
-    if (item.kind === "block" && item.block !== undefined) {
+    if (item && item.kind === "block" && item.block !== undefined) {
       const icon = document.createElement("canvas");
       icon.width = 32;
       icon.height = 32;
@@ -160,7 +161,7 @@ export function renderHotbar(hud: HudElements, selectedSlot: number, world: Voxe
       const tile = tileIndexForBlock(item.block);
       ctx.drawImage(atlas, tile * 16, 0, 16, 16, 0, 0, 32, 32);
       slot.appendChild(icon);
-    } else {
+    } else if (item) {
       const icon = document.createElement("div");
       icon.textContent = item.icon || "?";
       icon.style.cssText = "font-size:28px;line-height:1";
@@ -168,6 +169,18 @@ export function renderHotbar(hud: HudElements, selectedSlot: number, world: Voxe
     }
 
     hud.hotbar.appendChild(slot);
+  }
+
+  // Inventory button
+  if (onOpenInventory) {
+    const invBtn = document.createElement("div");
+    invBtn.style.cssText = "width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;border:2px solid rgba(255,255,255,0.2);background:rgba(10,14,18,0.7);cursor:pointer;pointer-events:auto;margin-left:6px;font-size:18px;color:#b0b8c0;transition:border-color 0.15s";
+    invBtn.textContent = "...";
+    invBtn.title = "Инвентарь (E)";
+    invBtn.onmouseenter = () => { invBtn.style.borderColor = "#f2d472"; };
+    invBtn.onmouseleave = () => { invBtn.style.borderColor = "rgba(255,255,255,0.2)"; };
+    invBtn.onclick = onOpenInventory;
+    hud.hotbar.appendChild(invBtn);
   }
 }
 

@@ -22,7 +22,8 @@ import {
   BODY_WIDTH, BODY_HEIGHT, BODY_RADIUS,
   HEAD_RADIUS, HEAD_HALF_HEIGHT,
 } from "./constants";
-import { hotbarItems, heldItemTokenForItem, createHeldMeshFromToken } from "./items";
+import { hotbarItems, heldItemTokenForItem, createHeldMeshFromToken, type HotbarItem } from "./items";
+import { initInventory, createInventoryOverlay, isInventoryOpen, toggleInventory, closeInventory as closeInv } from "./inventory";
 import {
   createMiningState, resetMining, updateCrackOverlay, crackOverlay,
   getRequiredHits, spawnBreakParticles, updateBreakParticles, updateMining,
@@ -193,11 +194,24 @@ let yaw = 0;
 let pitch = 0;
 let pointerLocked = false;
 
+// --- Inventory ---
+const selectedSlotObj = { value: selectedSlot };
+initInventory(hotbarItems, selectedSlotObj, world, () => {
+  reRenderHotbar();
+  setHeldItem(hotbarItems[selectedSlot]);
+});
+const inventoryOverlay = createInventoryOverlay();
+document.body.appendChild(inventoryOverlay);
+
+function reRenderHotbar() {
+  renderHotbar(hud, hotbarItems, selectedSlot, world, () => toggleInventory());
+}
+
 // --- HUD & Title ---
 const hud: HudElements = createHud();
 document.body.appendChild(hud.root);
 document.body.appendChild(hud.deathOverlay);
-renderHotbar(hud, selectedSlot, world);
+reRenderHotbar();
 setHeldItem(hotbarItems[selectedSlot]);
 updateHpBar(hud, player.hp);
 
@@ -466,26 +480,30 @@ function updateHeldItem(dt: number) {
   heldItemPivot.rotation.set(-0.25 - swing * 0.6, 0.55 + swing * 0.45, 0.12 + swing * 0.25);
 }
 
-function setHeldItem(item: typeof hotbarItems[0]) {
+function setHeldItem(item: HotbarItem | null) {
   if (heldItemMesh) {
     heldItemPivot.remove(heldItemMesh);
     heldItemMesh = null;
   }
+  if (!item) return;
   const mesh = createHeldMeshFromToken(heldItemTokenForItem(item), world);
   heldItemMesh = mesh;
   heldItemPivot.add(mesh);
 }
 
 function getCurrentHeldItemToken() {
-  return heldItemTokenForItem(hotbarItems[selectedSlot]);
+  const item = hotbarItems[selectedSlot];
+  return item ? heldItemTokenForItem(item) : "block:1";
 }
 
 function selectSlot(index: number) {
   selectedSlot = index;
+  selectedSlotObj.value = index;
   resetMining(miningState);
-  renderHotbar(hud, selectedSlot, world);
+  reRenderHotbar();
   setHeldItem(hotbarItems[index]);
-  gameLog.system(`Selected: ${hotbarItems[index].label}`);
+  const item = hotbarItems[index];
+  if (item) gameLog.system(`Selected: ${item.label}`);
   sendLocalPlayerState();
 }
 
@@ -529,7 +547,7 @@ function hitBlock() {
   const block = world.getBlock(bx, by, bz);
   if (block === BlockId.Air || block === BlockId.Bedrock) return;
 
-  const tool = hotbarItems[selectedSlot].id;
+  const tool = hotbarItems[selectedSlot]?.id ?? "hand";
 
   if (miningState.blockX !== bx || miningState.blockY !== by || miningState.blockZ !== bz) {
     miningState.blockX = bx;
@@ -560,7 +578,7 @@ function hitBlock() {
           miningState.blockY = ny;
           miningState.blockZ = nz;
           miningState.hits = 0;
-          miningState.required = getRequiredHits(nextBlock, hotbarItems[selectedSlot].id);
+          miningState.required = getRequiredHits(nextBlock, hotbarItems[selectedSlot]?.id ?? "hand");
           miningState.active = true;
           miningState.timer = 0;
         }
@@ -573,7 +591,7 @@ function hitBlock() {
 
 function placeBlock() {
   const selected = hotbarItems[selectedSlot];
-  if (selected.kind !== "block" || selected.block === undefined) return;
+  if (!selected || selected.kind !== "block" || selected.block === undefined) return;
   const hit = getTargetedBlock();
   if (!hit) return;
   const place = hit.place;
@@ -688,7 +706,7 @@ function updateDebugColliders() {
 
 function refreshTitleScreen() {
   updateTitleScreen(
-    title, chatState.open, pointerLocked,
+    title, chatState.open || isInventoryOpen(), pointerLocked,
     networkState.started, networkState.pageActive,
     networkState.connected, networkState.connecting,
     networkState.reconnectTimer, networkState.lastError
@@ -752,7 +770,12 @@ function wireInput() {
       case "Digit8": if (pointerLocked) selectSlot(7); break;
       case "Digit9": if (pointerLocked) selectSlot(8); break;
       case "F3": toggleDebugColliders(); event.preventDefault(); break;
-      case "Escape": if (chatState.open) { closeChatInput(false); } else { document.exitPointerLock(); } break;
+      case "KeyE": if (pointerLocked || isInventoryOpen()) { toggleInventory(); event.preventDefault(); } break;
+      case "Escape":
+        if (isInventoryOpen()) { closeInv(); }
+        else if (chatState.open) { closeChatInput(false); }
+        else { document.exitPointerLock(); }
+        break;
     }
   });
 
@@ -778,7 +801,7 @@ function wireInput() {
     if (!pointerLocked || player.dead) return;
     if (event.button === 0) {
       const selected = hotbarItems[selectedSlot];
-      if (selected.id === "bow") {
+      if (selected?.id === "bow") {
         shootArrow();
       } else {
         miningState.mouseDown = true;

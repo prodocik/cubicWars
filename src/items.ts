@@ -10,17 +10,53 @@ export interface HotbarItem {
   icon?: string;
 }
 
-export const hotbarItems: HotbarItem[] = [
-  { id: "grass", label: "Grass", kind: "block", block: BlockId.Grass },
-  { id: "dirt", label: "Dirt", kind: "block", block: BlockId.Dirt },
-  { id: "stone", label: "Stone", kind: "block", block: BlockId.Stone },
-  { id: "log", label: "Log", kind: "block", block: BlockId.Log },
-  { id: "leaves", label: "Leaves", kind: "block", block: BlockId.Leaves },
-  { id: "axe", label: "Axe", kind: "tool", icon: "\u{1FA93}" },
-  { id: "pickaxe", label: "Pickaxe", kind: "tool", icon: "\u26CF\uFE0F" },
-  { id: "bow", label: "Bow", kind: "tool", icon: "\u{1F3F9}" },
-  { id: "sand", label: "Sand", kind: "block", block: BlockId.Sand },
+export const HOTBAR_SIZE = 9;
+
+export const allItems: HotbarItem[] = [
+  { id: "grass", label: "Трава", kind: "block", block: BlockId.Grass },
+  { id: "dirt", label: "Земля", kind: "block", block: BlockId.Dirt },
+  { id: "stone", label: "Камень", kind: "block", block: BlockId.Stone },
+  { id: "log", label: "Дерево", kind: "block", block: BlockId.Log },
+  { id: "leaves", label: "Листва", kind: "block", block: BlockId.Leaves },
+  { id: "sand", label: "Песок", kind: "block", block: BlockId.Sand },
+  { id: "snow", label: "Снег", kind: "block", block: BlockId.Snow },
+  { id: "cactus", label: "Кактус", kind: "block", block: BlockId.Cactus },
+  { id: "axe", label: "Топор", kind: "tool", icon: "\u{1FA93}" },
+  { id: "pickaxe", label: "Кирка", kind: "tool", icon: "\u26CF\uFE0F" },
+  { id: "bow", label: "Лук", kind: "tool", icon: "\u{1F3F9}" },
 ];
+
+export function getItemById(id: string): HotbarItem | undefined {
+  return allItems.find(item => item.id === id);
+}
+
+const defaultHotbarIds = ["grass", "dirt", "stone", "log", "leaves", "axe", "pickaxe", "bow", "sand"];
+
+export function loadHotbar(): (HotbarItem | null)[] {
+  const slots: (HotbarItem | null)[] = new Array(HOTBAR_SIZE).fill(null);
+  const saved = localStorage.getItem("cubic.hotbar");
+  if (saved) {
+    try {
+      const ids = JSON.parse(saved) as (string | null)[];
+      for (let i = 0; i < HOTBAR_SIZE; i++) {
+        slots[i] = ids[i] ? getItemById(ids[i]!) ?? null : null;
+      }
+      return slots;
+    } catch { /* ignore */ }
+  }
+  for (let i = 0; i < HOTBAR_SIZE; i++) {
+    slots[i] = getItemById(defaultHotbarIds[i]) ?? null;
+  }
+  return slots;
+}
+
+export function saveHotbar(slots: (HotbarItem | null)[]) {
+  const ids = slots.map(s => s?.id ?? null);
+  localStorage.setItem("cubic.hotbar", JSON.stringify(ids));
+}
+
+// Kept for backward compat — points to the live hotbar
+export let hotbarItems: (HotbarItem | null)[] = loadHotbar();
 
 export function heldItemTokenForItem(item: HotbarItem) {
   if (item.kind === "block" && item.block !== undefined) {
