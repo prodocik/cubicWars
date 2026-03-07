@@ -235,8 +235,10 @@ document.body.appendChild(title.overlay);
 document.body.appendChild(hud.voteOverlay);
 
 let voteHasVoted = false;
+let voteIsInitiator = false;
 hud.voteYesBtn.onclick = () => castVote("yes");
 hud.voteNoBtn.onclick = () => castVote("no");
+hud.voteCancelBtn.onclick = () => cancelVote();
 
 refreshTitleScreen();
 
@@ -855,19 +857,27 @@ function castVote(vote: "yes" | "no") {
   hud.voteStatus.textContent = vote === "yes" ? "Вы проголосовали: За" : "Вы проголосовали: Против";
 }
 
+function cancelVote() {
+  if (!networkState.connected || !networkState.ws || networkState.ws.readyState !== WebSocket.OPEN) return;
+  networkState.ws.send(JSON.stringify({ type: "cancel_vote" }));
+}
+
 function showVoteOverlay(initiator: string, yes: number, no: number, total: number, timeLeft: number) {
   hud.voteOverlay.style.display = "flex";
   hud.voteTitle.textContent = `${initiator} предлагает перегенерировать мир`;
   hud.voteCountdown.textContent = `${Math.ceil(timeLeft / 1000)}`;
   hud.voteCounts.textContent = `За: ${yes}  |  Против: ${no}  |  Всего: ${total}`;
+  hud.voteCancelBtn.style.display = voteIsInitiator ? "inline-block" : "none";
 }
 
 function hideVoteOverlay() {
   hud.voteOverlay.style.display = "none";
   hud.voteYesBtn.disabled = false;
   hud.voteNoBtn.disabled = false;
+  hud.voteCancelBtn.style.display = "none";
   hud.voteStatus.textContent = "";
   voteHasVoted = false;
+  voteIsInitiator = false;
 }
 
 // --- Networking ---
@@ -1044,6 +1054,7 @@ function handleServerMessage(message: ServerMessage) {
     case "vote_started": {
       const isInitiator = message.initiator === networkState.playerName;
       voteHasVoted = isInitiator;
+      voteIsInitiator = isInitiator;
       hud.voteYesBtn.disabled = isInitiator;
       hud.voteNoBtn.disabled = isInitiator;
       hud.voteStatus.textContent = isInitiator ? "Вы инициировали голосование (За)" : "";
@@ -1061,6 +1072,10 @@ function handleServerMessage(message: ServerMessage) {
       } else {
         gameLog.warn(`Голосование не прошло. (За: ${message.yes}, Против: ${message.no})`);
       }
+      hideVoteOverlay();
+      break;
+    case "vote_cancelled":
+      gameLog.system("Голосование отменено.");
       hideVoteOverlay();
       break;
     case "world_reset":

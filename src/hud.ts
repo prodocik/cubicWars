@@ -24,6 +24,7 @@ export interface HudElements {
   voteCounts: HTMLDivElement;
   voteYesBtn: HTMLButtonElement;
   voteNoBtn: HTMLButtonElement;
+  voteCancelBtn: HTMLButtonElement;
   voteStatus: HTMLDivElement;
 }
 
@@ -122,7 +123,11 @@ export function createHud(): HudElements {
   voteNoBtn.textContent = "Против";
   voteNoBtn.style.cssText = btnStyle + ";background:#c04040";
 
-  voteBtns.append(voteYesBtn, voteNoBtn);
+  const voteCancelBtn = document.createElement("button");
+  voteCancelBtn.textContent = "Отменить";
+  voteCancelBtn.style.cssText = btnStyle + ";background:#666;display:none";
+
+  voteBtns.append(voteYesBtn, voteNoBtn, voteCancelBtn);
 
   const voteStatus = document.createElement("div");
   voteStatus.style.cssText = "font-size:13px;color:#8898a8;margin-top:4px";
@@ -133,7 +138,7 @@ export function createHud(): HudElements {
   info.append(coords, chunk, status);
   root.append(crosshair, info, hint, hotbar, chatWrap, hpBar, hpText);
 
-  return { root, coords, chunk, status, hint, hotbar, chatWrap, chatInput, hpFill, hpText, deathOverlay, deathTimer, voteOverlay, voteTitle, voteCountdown, voteCounts, voteYesBtn, voteNoBtn, voteStatus };
+  return { root, coords, chunk, status, hint, hotbar, chatWrap, chatInput, hpFill, hpText, deathOverlay, deathTimer, voteOverlay, voteTitle, voteCountdown, voteCounts, voteYesBtn, voteNoBtn, voteCancelBtn, voteStatus };
 }
 
 export function renderHotbar(hud: HudElements, slots: (HotbarItem | null)[], selectedSlot: number, world: VoxelWorld, onOpenInventory?: () => void) {

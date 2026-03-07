@@ -75,6 +75,10 @@ export interface CastVoteMessage {
   vote: "yes" | "no";
 }
 
+export interface CancelVoteMessage {
+  type: "cancel_vote";
+}
+
 export interface InitMessage {
   type: "init";
   id: string;
@@ -165,6 +169,10 @@ export interface VoteResultBroadcast {
   no: number;
 }
 
+export interface VoteCancelledBroadcast {
+  type: "vote_cancelled";
+}
+
 export interface WorldResetBroadcast {
   type: "world_reset";
 }
@@ -177,7 +185,8 @@ export type ClientMessage =
   | ShootArrowMessage
   | HitPlayerMessage
   | StartVoteMessage
-  | CastVoteMessage;
+  | CastVoteMessage
+  | CancelVoteMessage;
 
 export type ServerMessage =
   | InitMessage
@@ -193,4 +202,5 @@ export type ServerMessage =
   | VoteStartedBroadcast
   | VoteUpdateBroadcast
   | VoteResultBroadcast
+  | VoteCancelledBroadcast
   | WorldResetBroadcast;

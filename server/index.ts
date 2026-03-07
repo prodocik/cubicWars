@@ -7,6 +7,7 @@ import {
   type BlockEditState,
   type ChatMessage,
   type ClientMessage,
+  type CancelVoteMessage,
   type CastVoteMessage,
   type HitPlayerMessage,
   type JoinMessage,
@@ -50,6 +51,7 @@ const VOTE_DURATION_MS = 30_000;
 const VOTE_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 let voteActive = false;
 let voteInitiator = "";
+let voteInitiatorId = "";
 let voteYes = new Set<string>();
 let voteNo = new Set<string>();
 let voteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -202,6 +204,11 @@ function isStartVoteMessage(raw: unknown): raw is StartVoteMessage {
 function isCastVoteMessage(raw: unknown): raw is CastVoteMessage {
   if (!raw || typeof raw !== "object") return false;
   return (raw as Record<string, unknown>).type === "cast_vote";
+}
+
+function isCancelVoteMessage(raw: unknown): raw is CancelVoteMessage {
+  if (!raw || typeof raw !== "object") return false;
+  return (raw as Record<string, unknown>).type === "cancel_vote";
 }
 
 function playerPublicState(player: ServerPlayer): RemotePlayerState {
@@ -371,6 +378,7 @@ function handleStartVote(player: ServerPlayer) {
 
   voteActive = true;
   voteInitiator = player.name;
+  voteInitiatorId = player.id;
   voteYes = new Set<string>([player.id]); // initiator auto-votes yes
   voteNo = new Set<string>();
   voteStartTime = Date.now();
@@ -424,6 +432,18 @@ function handleCastVote(player: ServerPlayer, msg: CastVoteMessage) {
   if (voteYes.size + voteNo.size >= players.size) {
     resolveVote();
   }
+}
+
+function handleCancelVote(player: ServerPlayer) {
+  if (!voteActive) return;
+  if (player.id !== voteInitiatorId) {
+    sendTo(player.ws, { type: "chat", id: "", name: "Server", text: "Только инициатор может отменить голосование." });
+    return;
+  }
+  if (voteTimer) { clearTimeout(voteTimer); voteTimer = null; }
+  if (voteCountdownInterval) { clearInterval(voteCountdownInterval); voteCountdownInterval = null; }
+  voteActive = false;
+  broadcast({ type: "vote_cancelled" });
 }
 
 function resolveVote() {
@@ -861,6 +881,11 @@ wss.on("connection", (ws) => {
 
     if (isCastVoteMessage(message)) {
       handleCastVote(player, message);
+      return;
+    }
+
+    if (isCancelVoteMessage(message)) {
+      handleCancelVote(player);
     }
   });
 
