@@ -31,6 +31,7 @@ export enum BlockId {
   Water = 8,
   Snow = 9,
   Cactus = 10,
+  IronOre = 11,
 }
 
 export enum Biome {
@@ -65,7 +66,7 @@ export interface RaycastHit {
 }
 
 const ATLAS_TILE = 16;
-const ATLAS_COLS = 16;
+const ATLAS_COLS = 17;
 const ATLAS_ROWS = 1;
 const TEXTURE_INDEX = {
   grassTop: 0,
@@ -84,6 +85,7 @@ const TEXTURE_INDEX = {
   cactusTop: 13,
   swampGrassTop: 14,
   swampGrassSide: 15,
+  ironOre: 16,
 };
 
 const FACE_DEFS = [
@@ -557,21 +559,27 @@ function sampleBiome(x: number, z: number): Biome {
 }
 
 // --- Terrain blocks ---
-function sampleTerrain(_x: number, y: number, _z: number, surface: number, biome: Biome): BlockId {
+function stoneOrOre(x: number, y: number, z: number): BlockId {
+  // Use 3D noise to create ore clusters; ~1/3 of stone becomes iron ore
+  const oreNoise = value3D(x * 0.12, y * 0.12, z * 0.12, 7777 + worldSeed);
+  return oreNoise > 0.58 ? BlockId.IronOre : BlockId.Stone;
+}
+
+function sampleTerrain(x: number, y: number, z: number, surface: number, biome: Biome): BlockId {
   if (biome === Biome.Desert) {
     if (y === surface) return BlockId.Sand;
     if (y >= surface - 5) return BlockId.Sand;
-    return BlockId.Stone;
+    return stoneOrOre(x, y, z);
   }
   if (biome === Biome.Snow) {
     if (y === surface) return BlockId.Snow;
     if (y >= surface - 3) return BlockId.Dirt;
-    return BlockId.Stone;
+    return stoneOrOre(x, y, z);
   }
   if (biome === Biome.Swamp) {
     if (y === surface) return BlockId.Grass;
     if (y >= surface - 3) return BlockId.Dirt;
-    return BlockId.Stone;
+    return stoneOrOre(x, y, z);
   }
   // Plains & Jungle
   // Beach: near water level, use sand
@@ -581,7 +589,7 @@ function sampleTerrain(_x: number, y: number, _z: number, surface: number, biome
     if (surface <= WATER_LEVEL + 2) return BlockId.Sand;
     return BlockId.Dirt;
   }
-  return BlockId.Stone;
+  return stoneOrOre(x, y, z);
 }
 
 // --- Vegetation (trees, cacti) above surface ---
@@ -711,6 +719,7 @@ function blockFaceTile(block: BlockId, faceIndex: number) {
     return TEXTURE_INDEX.snowSide;
   }
   if (block === BlockId.Cactus) return faceIndex === 2 || faceIndex === 3 ? TEXTURE_INDEX.cactusTop : TEXTURE_INDEX.cactusSide;
+  if (block === BlockId.IronOre) return TEXTURE_INDEX.ironOre;
   return TEXTURE_INDEX.stone;
 }
 
@@ -738,6 +747,27 @@ function fbm2D(x: number, z: number, octaves: number, seed: number) {
     frequency *= 2;
   }
   return sum / max;
+}
+
+function value3D(x: number, y: number, z: number, seed: number) {
+  const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+  const fx = x - ix, fy = y - iy, fz = z - iz;
+  const ux = smooth(fx), uy = smooth(fy), uz = smooth(fz);
+  const a = hash3(ix, iy, iz, seed), b = hash3(ix + 1, iy, iz, seed);
+  const c = hash3(ix, iy + 1, iz, seed), d = hash3(ix + 1, iy + 1, iz, seed);
+  const e = hash3(ix, iy, iz + 1, seed), f = hash3(ix + 1, iy, iz + 1, seed);
+  const g = hash3(ix, iy + 1, iz + 1, seed), h = hash3(ix + 1, iy + 1, iz + 1, seed);
+  const ab = lerp(a, b, ux), cd = lerp(c, d, ux);
+  const ef = lerp(e, f, ux), gh = lerp(g, h, ux);
+  const abcd = lerp(ab, cd, uy), efgh = lerp(ef, gh, uy);
+  return lerp(abcd, efgh, uz);
+}
+
+function hash3(x: number, y: number, z: number, seed: number) {
+  let h = x * 374761393 + y * 668265263 + z * 1274126177 + seed * 69069;
+  h = (h ^ (h >> 13)) >>> 0;
+  h = Math.imul(h, 1274126177) >>> 0;
+  return (h & 0xffff) / 0xffff;
 }
 
 export function value2D(x: number, z: number, seed: number) {
@@ -803,6 +833,7 @@ function createAtlasTexture() {
   drawCactusTop(ctx, 13);
   drawSwampGrassTop(ctx, 14);
   drawSwampGrassSide(ctx, 15);
+  drawIronOre(ctx, 16);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.magFilter = THREE.NearestFilter;
@@ -964,6 +995,19 @@ function drawSwampGrassSide(ctx: CanvasRenderingContext2D, tile: number) {
   }
   sprinkle(ctx, tile, "#5a2810", 52, 0.21, 5);
   addTileRim(ctx, tile, "#a07030", "#402010");
+}
+
+function drawIronOre(ctx: CanvasRenderingContext2D, tile: number) {
+  // Stone base
+  paintBase(ctx, tile, "#8f9fb0");
+  checker(ctx, tile, "#9baaBA", "#7a8695");
+  sprinkle(ctx, tile, "#53606d", 59, 0.22);
+  sprinkle(ctx, tile, "#dbe4ee", 21, 0.1);
+  // Orange/rusty iron ore specks
+  sprinkle(ctx, tile, "#c87830", 133, 0.18);
+  sprinkle(ctx, tile, "#e8a050", 149, 0.12);
+  sprinkle(ctx, tile, "#a05820", 157, 0.08);
+  addTileRim(ctx, tile, "#d0a060", "#49525d");
 }
 
 function paintBase(ctx: CanvasRenderingContext2D, tile: number, color: string) { fillTile(ctx, tile, color); }

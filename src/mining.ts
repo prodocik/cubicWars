@@ -11,12 +11,14 @@ export const BLOCK_COLORS: Record<number, number[]> = {
   [BlockId.Sand]: [0xe8d088, 0xdcc47a, 0xc4a858],
   [BlockId.Snow]: [0xf0f4f8, 0xe8ecf0, 0xd0d8e0],
   [BlockId.Cactus]: [0x2a8030, 0x308838, 0x40a048],
+  [BlockId.IronOre]: [0x8f9fb0, 0xc08040, 0x9a6830],
 };
 
 export function getRequiredHits(block: BlockId, tool: string): number {
   if (tool === "pickaxe") {
     if (block === BlockId.Dirt || block === BlockId.Grass || block === BlockId.Sand || block === BlockId.Snow) return 1;
     if (block === BlockId.Stone) return 4;
+    if (block === BlockId.IronOre) return 5;
     if (block === BlockId.Log) return 4;
     if (block === BlockId.Leaves) return 1;
   }
@@ -25,11 +27,13 @@ export function getRequiredHits(block: BlockId, tool: string): number {
     if (block === BlockId.Leaves) return 1;
     if (block === BlockId.Dirt || block === BlockId.Grass) return 3;
     if (block === BlockId.Stone) return 7;
+    if (block === BlockId.IronOre) return 9;
   }
   // Hand
   if (block === BlockId.Dirt || block === BlockId.Grass || block === BlockId.Snow) return 5;
   if (block === BlockId.Sand) return 3;
   if (block === BlockId.Stone) return 7;
+  if (block === BlockId.IronOre) return 10;
   if (block === BlockId.Log) return 4;
   if (block === BlockId.Leaves) return 2;
   if (block === BlockId.Cactus) return 3;

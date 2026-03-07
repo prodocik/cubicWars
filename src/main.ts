@@ -22,7 +22,7 @@ import {
   BODY_WIDTH, BODY_HEIGHT, BODY_RADIUS,
   HEAD_RADIUS, HEAD_HALF_HEIGHT,
 } from "./constants";
-import { hotbarItems, heldItemTokenForItem, createHeldMeshFromToken, type HotbarItem } from "./items";
+import { hotbarItems, heldItemTokenForItem, createHeldMeshFromToken, getItemByBlock, saveHotbar, type HotbarItem } from "./items";
 import { initInventory, createInventoryOverlay, isInventoryOpen, toggleInventory, closeInventory as closeInv } from "./inventory";
 import {
   createMiningState, resetMining, updateCrackOverlay, crackOverlay,
@@ -567,6 +567,7 @@ function hitBlock() {
     spawnBreakParticles(bx, by, bz, block, scene, breakParticles, player.position);
     world.setBlock(bx, by, bz, BlockId.Air);
     sendBlockUpdate(bx, by, bz, BlockId.Air);
+    collectMinedBlock(block);
     resetMining(miningState);
 
     // If still holding mouse, immediately start mining the next block
@@ -594,12 +595,53 @@ function hitBlock() {
 function placeBlock() {
   const selected = hotbarItems[selectedSlot];
   if (!selected || selected.kind !== "block" || selected.block === undefined) return;
+  // Check if we have resources to place
+  if (selected.count !== undefined && selected.count <= 0) return;
   const hit = getTargetedBlock();
   if (!hit) return;
   const place = hit.place;
   if (intersectsPlayer(place)) return;
   world.setBlock(place.x, place.y, place.z, selected.block);
   sendBlockUpdate(place.x, place.y, place.z, selected.block);
+  // Consume resource
+  if (selected.count !== undefined) {
+    selected.count--;
+    if (selected.count <= 0) {
+      hotbarItems[selectedSlot] = null;
+      setHeldItem(null);
+    }
+    saveHotbar(hotbarItems);
+    reRenderHotbar();
+  }
+}
+
+function collectMinedBlock(block: BlockId) {
+  const itemDef = getItemByBlock(block);
+  if (!itemDef) return;
+
+  // Try to stack into existing hotbar slot with same block
+  for (let i = 0; i < hotbarItems.length; i++) {
+    const slot = hotbarItems[i];
+    if (slot && slot.kind === "block" && slot.block === block) {
+      slot.count = (slot.count ?? 0) + 1;
+      saveHotbar(hotbarItems);
+      reRenderHotbar();
+      return;
+    }
+  }
+
+  // Try to place in first empty hotbar slot
+  for (let i = 0; i < hotbarItems.length; i++) {
+    if (!hotbarItems[i]) {
+      hotbarItems[i] = { ...itemDef, count: 1 };
+      saveHotbar(hotbarItems);
+      reRenderHotbar();
+      if (i === selectedSlot) setHeldItem(hotbarItems[i]);
+      return;
+    }
+  }
+
+  // Hotbar full — resource is lost (no overflow inventory)
 }
 
 function getTargetedBlock() {

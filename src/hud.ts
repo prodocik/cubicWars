@@ -173,6 +173,14 @@ export function renderHotbar(hud: HudElements, slots: (HotbarItem | null)[], sel
       slot.appendChild(icon);
     }
 
+    // Show count for block items
+    if (item && item.count !== undefined) {
+      const countEl = document.createElement("span");
+      countEl.textContent = String(item.count);
+      countEl.style.cssText = "position:absolute;bottom:2px;right:4px;font-size:11px;font-weight:bold;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,0.9)";
+      slot.appendChild(countEl);
+    }
+
     hud.hotbar.appendChild(slot);
   }
 

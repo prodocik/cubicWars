@@ -96,7 +96,7 @@ function rebuildContent() {
         const existIdx = hotbarSlots.findIndex(s => s?.id === item.id);
         if (existIdx !== -1) return;
         if (emptyIdx !== -1) {
-          hotbarSlots[emptyIdx] = item;
+          hotbarSlots[emptyIdx] = item.kind === "block" ? { ...item, count: 0 } : { ...item };
           saveHotbar(hotbarSlots);
           if (onChangeCallback) onChangeCallback();
           rebuildContent();
@@ -187,6 +187,14 @@ function createSlotElement(item: HotbarItem | null, world: VoxelWorld, isHotbarS
     cell.appendChild(icon);
   }
 
+  // Show count for hotbar slots with finite resources
+  if (isHotbarSlot && item.count !== undefined) {
+    const countEl = document.createElement("span");
+    countEl.textContent = String(item.count);
+    countEl.style.cssText = "position:absolute;bottom:2px;right:4px;font-size:11px;font-weight:bold;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,0.9);pointer-events:none";
+    cell.appendChild(countEl);
+  }
+
   return cell;
 }
 
@@ -239,7 +247,7 @@ function onDragEnd(e: MouseEvent) {
     const targetIndex = Number(slotEl.dataset.hotbarIndex);
 
     if (dragSource.type === "inventory") {
-      hotbarSlots[targetIndex] = dragItem;
+      hotbarSlots[targetIndex] = dragItem.kind === "block" ? { ...dragItem, count: 0 } : { ...dragItem };
     } else if (dragSource.type === "hotbar") {
       // Swap hotbar slots
       const srcItem = hotbarSlots[dragSource.index];

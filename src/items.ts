@@ -8,6 +8,7 @@ export interface HotbarItem {
   kind: "block" | "tool";
   block?: BlockId;
   icon?: string;
+  count?: number;
 }
 
 export const HOTBAR_SIZE = 9;
@@ -21,6 +22,7 @@ export const allItems: HotbarItem[] = [
   { id: "sand", label: "Песок", kind: "block", block: BlockId.Sand },
   { id: "snow", label: "Снег", kind: "block", block: BlockId.Snow },
   { id: "cactus", label: "Кактус", kind: "block", block: BlockId.Cactus },
+  { id: "iron_ore", label: "Железная руда", kind: "block", block: BlockId.IronOre },
   { id: "axe", label: "Топор", kind: "tool", icon: "\u{1FA93}" },
   { id: "pickaxe", label: "Кирка", kind: "tool", icon: "\u26CF\uFE0F" },
   { id: "bow", label: "Лук", kind: "tool", icon: "\u{1F3F9}" },
@@ -30,29 +32,42 @@ export function getItemById(id: string): HotbarItem | undefined {
   return allItems.find(item => item.id === id);
 }
 
+export function getItemByBlock(block: BlockId): HotbarItem | undefined {
+  return allItems.find(item => item.block === block);
+}
+
 const defaultHotbarIds = ["grass", "dirt", "stone", "log", "leaves", "axe", "pickaxe", "bow", "sand"];
 
 export function loadHotbar(): (HotbarItem | null)[] {
   const slots: (HotbarItem | null)[] = new Array(HOTBAR_SIZE).fill(null);
-  const saved = localStorage.getItem("cubic.hotbar");
+  const saved = localStorage.getItem("cubic.hotbar2");
   if (saved) {
     try {
-      const ids = JSON.parse(saved) as (string | null)[];
+      const entries = JSON.parse(saved) as ({ id: string; count?: number } | null)[];
       for (let i = 0; i < HOTBAR_SIZE; i++) {
-        slots[i] = ids[i] ? getItemById(ids[i]!) ?? null : null;
+        const entry = entries[i];
+        if (entry) {
+          const base = getItemById(entry.id);
+          if (base) {
+            slots[i] = { ...base, count: entry.count };
+          }
+        }
       }
       return slots;
     } catch { /* ignore */ }
   }
   for (let i = 0; i < HOTBAR_SIZE; i++) {
-    slots[i] = getItemById(defaultHotbarIds[i]) ?? null;
+    const item = getItemById(defaultHotbarIds[i]);
+    if (item) {
+      slots[i] = item.kind === "block" ? { ...item, count: 0 } : { ...item };
+    }
   }
   return slots;
 }
 
 export function saveHotbar(slots: (HotbarItem | null)[]) {
-  const ids = slots.map(s => s?.id ?? null);
-  localStorage.setItem("cubic.hotbar", JSON.stringify(ids));
+  const entries = slots.map(s => s ? { id: s.id, count: s.count } : null);
+  localStorage.setItem("cubic.hotbar2", JSON.stringify(entries));
 }
 
 // Kept for backward compat — points to the live hotbar
@@ -157,5 +172,6 @@ export function tileIndexForBlock(block: BlockId) {
   if (block === BlockId.Sand) return 8;
   if (block === BlockId.Snow) return 10;
   if (block === BlockId.Cactus) return 12;
+  if (block === BlockId.IronOre) return 16;
   return 3;
 }
