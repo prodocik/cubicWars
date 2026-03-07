@@ -772,7 +772,7 @@ function wireInput() {
       case "Digit8": if (pointerLocked) selectSlot(7); break;
       case "Digit9": if (pointerLocked) selectSlot(8); break;
       case "F3": toggleDebugColliders(); event.preventDefault(); break;
-      case "KeyE": if (pointerLocked || isInventoryOpen()) { toggleInventory(); event.preventDefault(); } break;
+      case "KeyI": if (pointerLocked || isInventoryOpen()) { toggleInventory(); event.preventDefault(); } break;
       case "Escape":
         if (isInventoryOpen()) { closeInv(); }
         else if (chatState.open) { closeChatInput(false); }

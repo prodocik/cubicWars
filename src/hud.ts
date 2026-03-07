@@ -50,7 +50,7 @@ export function createHud(): HudElements {
 
   const hint = document.createElement("div");
   hint.style.cssText = "position:absolute;left:50%;bottom:88px;transform:translateX(-50%);padding:6px 10px;border-radius:10px;background:rgba(0,0,0,0.38);font-size:12px;color:#deedde";
-  hint.textContent = "WASD move, Space jump, E inventory, Enter chat, LMB mine, RMB place, 1-9 select";
+  hint.textContent = "WASD move, Space jump, I inventory, Enter chat, LMB mine, RMB place, 1-9 select";
 
   const hotbar = document.createElement("div");
   hotbar.style.cssText = "position:absolute;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:6px;align-items:center;pointer-events:none";
@@ -179,9 +179,13 @@ export function renderHotbar(hud: HudElements, slots: (HotbarItem | null)[], sel
   // Inventory button
   if (onOpenInventory) {
     const invBtn = document.createElement("div");
-    invBtn.style.cssText = "width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;border:2px solid rgba(255,255,255,0.2);background:rgba(10,14,18,0.7);cursor:pointer;pointer-events:auto;margin-left:6px;font-size:18px;color:#b0b8c0;transition:border-color 0.15s";
-    invBtn.textContent = "...";
-    invBtn.title = "Инвентарь (E)";
+    invBtn.style.cssText = "width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;border:2px solid rgba(255,255,255,0.2);background:rgba(10,14,18,0.7);cursor:pointer;pointer-events:auto;margin-left:6px;transition:border-color 0.15s;position:relative";
+    invBtn.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#b0b8c0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M2 11h20"/><path d="M10 11v3h4v-3"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>`;
+    invBtn.title = "Инвентарь (I)";
+    const invLabel = document.createElement("span");
+    invLabel.textContent = "I";
+    invLabel.style.cssText = "position:absolute;top:2px;left:4px;font-size:10px;color:#f2d472;font-weight:bold;text-shadow:0 0 2px rgba(0,0,0,0.8)";
+    invBtn.appendChild(invLabel);
     invBtn.onmouseenter = () => { invBtn.style.borderColor = "#f2d472"; };
     invBtn.onmouseleave = () => { invBtn.style.borderColor = "rgba(255,255,255,0.2)"; };
     invBtn.onclick = onOpenInventory;

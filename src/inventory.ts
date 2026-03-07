@@ -78,29 +78,31 @@ function rebuildContent() {
   gridLabel.style.cssText = "font-size:12px;color:#8898a8;align-self:flex-start";
   container.appendChild(gridLabel);
 
-  // Items grid
-  const cols = Math.min(6, allItems.length);
+  // Items grid (6x6)
+  const GRID_COLS = 6;
+  const GRID_ROWS = 6;
+  const totalCells = GRID_COLS * GRID_ROWS;
   const grid = document.createElement("div");
-  grid.style.cssText = `display:grid;grid-template-columns:repeat(${cols},58px);gap:6px`;
+  grid.style.cssText = `display:grid;grid-template-columns:repeat(${GRID_COLS},58px);gap:6px`;
 
-  for (let i = 0; i < allItems.length; i++) {
-    const item = allItems[i];
+  for (let i = 0; i < totalCells; i++) {
+    const item = i < allItems.length ? allItems[i] : null;
     const cell = createSlotElement(item, worldRef, false, false);
-    cell.title = item.label;
-    cell.addEventListener("mousedown", (e) => startDrag(e, item, "inventory", i));
-    // Double click to quickly add to first empty hotbar slot
-    cell.addEventListener("dblclick", () => {
-      const emptyIdx = hotbarSlots.indexOf(null);
-      // Also check if already in hotbar
-      const existIdx = hotbarSlots.findIndex(s => s?.id === item.id);
-      if (existIdx !== -1) return; // already in hotbar
-      if (emptyIdx !== -1) {
-        hotbarSlots[emptyIdx] = item;
-        saveHotbar(hotbarSlots);
-        if (onChangeCallback) onChangeCallback();
-        rebuildContent();
-      }
-    });
+    if (item) {
+      cell.title = item.label;
+      cell.addEventListener("mousedown", (e) => startDrag(e, item, "inventory", i));
+      cell.addEventListener("dblclick", () => {
+        const emptyIdx = hotbarSlots.indexOf(null);
+        const existIdx = hotbarSlots.findIndex(s => s?.id === item.id);
+        if (existIdx !== -1) return;
+        if (emptyIdx !== -1) {
+          hotbarSlots[emptyIdx] = item;
+          saveHotbar(hotbarSlots);
+          if (onChangeCallback) onChangeCallback();
+          rebuildContent();
+        }
+      });
+    }
     grid.appendChild(cell);
   }
   container.appendChild(grid);
