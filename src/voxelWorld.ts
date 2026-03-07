@@ -811,7 +811,7 @@ function pushTorchGeometry(buf: MeshBuffers, bx: number, by: number, bz: number,
     fc = pushBox(buf, bx, by, bz, s0, 0, s0, s1, sH, s1,
       TEXTURE_INDEX.logSide, TEXTURE_INDEX.logTop, fc, 0.75, 0.6, 0.4);
     fc = pushBox(buf, bx, by, bz, f0, fBot, f0, f1, fTop, f1,
-      TEXTURE_INDEX.torch, TEXTURE_INDEX.torch, fc, 1.0, 0.95, 0.7);
+      TEXTURE_INDEX.torch, TEXTURE_INDEX.torch, fc, 1.4, 1.1, 0.5);
     return fc;
   }
 
@@ -834,7 +834,7 @@ function pushTorchGeometry(buf: MeshBuffers, bx: number, by: number, bz: number,
     TEXTURE_INDEX.logSide, TEXTURE_INDEX.logTop, fc, 0.75, 0.6, 0.4,
     rotAxis, angle, pivotX, wallY, pivotZ);
   fc = pushWallTorchBox(buf, bx, by, bz, f0, fBot, f0, f1, fTop, f1,
-    TEXTURE_INDEX.torch, TEXTURE_INDEX.torch, fc, 1.0, 0.95, 0.7,
+    TEXTURE_INDEX.torch, TEXTURE_INDEX.torch, fc, 1.4, 1.1, 0.5,
     rotAxis, angle, pivotX, wallY, pivotZ);
   return fc;
 }

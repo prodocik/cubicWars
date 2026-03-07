@@ -47,6 +47,7 @@ import {
   type HudElements, type TitleScreenUi,
 } from "./hud";
 import { getDefaultServerUrl, normalizeServerUrl, buildServerCandidates } from "./connection";
+import { updateTorchParticles } from "./torchParticles";
 import { createAppearanceSeed, isTypingInUi } from "./utils";
 
 // --- Scene setup ---
@@ -269,6 +270,7 @@ function animate() {
   updateDeathState(frameDt);
   updateMining(frameDt, miningState, player.dead, hitBlock, () => { swingTime = 1; });
   updateBreakParticles(frameDt, scene, breakParticles, player.position);
+  updateTorchParticles(frameDt, scene, world, player.position);
   updateHeldItem(frameDt);
   updateArrows(
     frameDt, combat, world, arrowsLayer,
@@ -604,15 +606,9 @@ function placeBlock() {
   if (intersectsPlayer(place)) return;
 
   let blockToPlace = selected.block;
-  // If placing a torch, choose variant based on surface normal
+  // If placing a torch, always try to attach to an adjacent wall
   if (blockToPlace === BlockId.Torch) {
-    const n = hit.normal;
-    if (n.x === 1) blockToPlace = BlockId.TorchE;       // placed on -X wall face
-    else if (n.x === -1) blockToPlace = BlockId.TorchW;  // placed on +X wall face
-    else if (n.z === 1) blockToPlace = BlockId.TorchS;   // placed on -Z wall face
-    else if (n.z === -1) blockToPlace = BlockId.TorchN;   // placed on +Z wall face
-    // n.y === 1 → floor torch, stays BlockId.Torch
-    // n.y === -1 → ceiling, stays as floor torch
+    blockToPlace = chooseTorchVariant(place.x, place.y, place.z, hit.normal);
   }
 
   world.setBlock(place.x, place.y, place.z, blockToPlace);
@@ -658,6 +654,24 @@ function collectMinedBlock(block: BlockId) {
   }
 
   // Hotbar full — resource is lost (no overflow inventory)
+}
+
+function chooseTorchVariant(px: number, py: number, pz: number, normal: THREE.Vector3): BlockId {
+  // Priority: the face we clicked on, then check all 4 horizontal neighbors for a wall
+  // If clicked a horizontal face, prefer that wall
+  if (normal.x === 1 && world.isSolid(world.getBlock(px - 1, py, pz))) return BlockId.TorchE;
+  if (normal.x === -1 && world.isSolid(world.getBlock(px + 1, py, pz))) return BlockId.TorchW;
+  if (normal.z === 1 && world.isSolid(world.getBlock(px, py, pz - 1))) return BlockId.TorchS;
+  if (normal.z === -1 && world.isSolid(world.getBlock(px, py, pz + 1))) return BlockId.TorchN;
+
+  // Check all 4 walls regardless of click direction
+  if (world.isSolid(world.getBlock(px - 1, py, pz))) return BlockId.TorchE;
+  if (world.isSolid(world.getBlock(px + 1, py, pz))) return BlockId.TorchW;
+  if (world.isSolid(world.getBlock(px, py, pz - 1))) return BlockId.TorchS;
+  if (world.isSolid(world.getBlock(px, py, pz + 1))) return BlockId.TorchN;
+
+  // No adjacent wall — floor torch
+  return BlockId.Torch;
 }
 
 function getTargetedBlock() {
