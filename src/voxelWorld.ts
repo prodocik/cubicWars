@@ -815,19 +815,19 @@ function pushTorchGeometry(buf: MeshBuffers, bx: number, by: number, bz: number,
     return fc;
   }
 
-  // Wall-mounted: pivot at base near wall, tilt ~25° away from wall
+  // Wall-mounted: base of stick is at wall surface, tilts outward ~25°
   const tilt = 0.44;
-  // Wall base height (stick starts partway up the block)
-  const wallY = 0.3;
-  // Pivot is at the wall surface, at wallY height, centered in z
+  // wallY = height on the wall where the stick base attaches
+  const wallY = 0.35;
   let pivotX = 0.5, pivotZ = 0.5;
   let rotAxis: "z" | "x" = "z";
   let rotSign = 1;
 
-  if (block === BlockId.TorchE) { pivotX = 0; rotAxis = "z"; rotSign = 1; }       // wall at x=0, lean +X
-  else if (block === BlockId.TorchW) { pivotX = 1; rotAxis = "z"; rotSign = -1; }  // wall at x=1, lean -X
-  else if (block === BlockId.TorchS) { pivotZ = 0; rotAxis = "x"; rotSign = -1; }  // wall at z=0, lean +Z
-  else if (block === BlockId.TorchN) { pivotZ = 1; rotAxis = "x"; rotSign = 1; }   // wall at z=1, lean -Z
+  // rotSign: the top of the stick must tilt AWAY from the wall
+  if (block === BlockId.TorchE) { pivotX = 0; rotAxis = "z"; rotSign = -1; }      // wall at x=0, top goes +X
+  else if (block === BlockId.TorchW) { pivotX = 1; rotAxis = "z"; rotSign = 1; }   // wall at x=1, top goes -X
+  else if (block === BlockId.TorchS) { pivotZ = 0; rotAxis = "x"; rotSign = -1; }  // wall at z=0, top goes +Z
+  else if (block === BlockId.TorchN) { pivotZ = 1; rotAxis = "x"; rotSign = 1; }   // wall at z=1, top goes -Z
 
   const angle = tilt * rotSign;
   fc = pushWallTorchBox(buf, bx, by, bz, s0, 0, s0, s1, sH, s1,
@@ -851,7 +851,8 @@ function pushWallTorchBox(
   const cosA = Math.cos(rotAngle), sinA = Math.sin(rotAngle);
 
   function transform(px: number, py: number, pz: number): [number, number, number] {
-    let lx = px - pivotX, ly = py - pivotY, lz = pz - pivotZ;
+    // Move torch so its base center (0.5, 0, 0.5) goes to origin, then rotate, then offset to pivot
+    const lx = px - 0.5, ly = py, lz = pz - 0.5;
     if (rotAxis === "z") {
       const rx = lx * cosA - ly * sinA;
       const ry = lx * sinA + ly * cosA;
