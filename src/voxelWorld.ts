@@ -32,6 +32,7 @@ export enum BlockId {
   Snow = 9,
   Cactus = 10,
   IronOre = 11,
+  Torch = 12,
 }
 
 export enum Biome {
@@ -55,6 +56,7 @@ interface MeshBuffers {
   positions: number[];
   normals: number[];
   uvs: number[];
+  colors: number[];
   indices: number[];
 }
 
@@ -66,7 +68,7 @@ export interface RaycastHit {
 }
 
 const ATLAS_TILE = 16;
-const ATLAS_COLS = 17;
+const ATLAS_COLS = 18;
 const ATLAS_ROWS = 1;
 const TEXTURE_INDEX = {
   grassTop: 0,
@@ -86,6 +88,7 @@ const TEXTURE_INDEX = {
   swampGrassTop: 14,
   swampGrassSide: 15,
   ironOre: 16,
+  torch: 17,
 };
 
 const FACE_DEFS = [
@@ -116,12 +119,13 @@ export class VoxelWorld {
 
   constructor() {
     this.atlas = createAtlasTexture();
-    this.material = new THREE.MeshLambertMaterial({ map: this.atlas });
+    this.material = new THREE.MeshLambertMaterial({ map: this.atlas, vertexColors: true });
     this.waterMaterial = new THREE.MeshLambertMaterial({
       map: this.atlas,
       transparent: true,
       opacity: 0.65,
       depthWrite: false,
+      vertexColors: true,
     });
     this.scene.add(new THREE.AmbientLight(0xffffff, 0));
   }
@@ -219,11 +223,11 @@ export class VoxelWorld {
   }
 
   isSolid(block: BlockId) {
-    return block !== BlockId.Air && block !== BlockId.Water;
+    return block !== BlockId.Air && block !== BlockId.Water && block !== BlockId.Torch;
   }
 
   isCollidable(block: BlockId) {
-    return block !== BlockId.Air && block !== BlockId.Water;
+    return block !== BlockId.Air && block !== BlockId.Water && block !== BlockId.Torch;
   }
 
   isWater(block: BlockId) {
@@ -273,7 +277,7 @@ export class VoxelWorld {
 
     for (let i = 0; i < 256 && distance <= maxDistance; i++) {
       const block = this.getBlock(current.x, current.y, current.z);
-      if (this.isSolid(block)) {
+      if (this.isSolid(block) || block === BlockId.Torch) {
         return { block: current.clone(), place: previous.clone(), normal: normal.clone(), distance };
       }
 
@@ -292,6 +296,10 @@ export class VoxelWorld {
   createBlockPreview(block: BlockId) {
     const geometry = new THREE.BoxGeometry(0.45, 0.45, 0.45);
     applyBlockUv(geometry, block);
+    const posCount = geometry.getAttribute("position").count;
+    const colors = new Float32Array(posCount * 3);
+    colors.fill(1.0);
+    geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
     const mat = block === BlockId.Water ? this.waterMaterial : this.material;
     return new THREE.Mesh(geometry, mat);
   }
@@ -402,8 +410,8 @@ export class VoxelWorld {
   }
 
   private buildChunkGeometry(cx: number, cz: number) {
-    const solidBuf: MeshBuffers = { positions: [], normals: [], uvs: [], indices: [] };
-    const waterBuf: MeshBuffers = { positions: [], normals: [], uvs: [], indices: [] };
+    const solidBuf: MeshBuffers = { positions: [], normals: [], uvs: [], colors: [], indices: [] };
+    const waterBuf: MeshBuffers = { positions: [], normals: [], uvs: [], colors: [], indices: [] };
     let solidFaces = 0;
     let waterFaces = 0;
     const startX = cx * CHUNK_SIZE;
@@ -426,7 +434,8 @@ export class VoxelWorld {
     maxY = Math.min(maxY + 1, WORLD_HEIGHT);
 
     const sampleSize = CHUNK_SIZE + 2;
-    const blocks = new Uint8Array(sampleSize * sampleSize * maxY);
+    const totalBlocks = sampleSize * sampleSize * maxY;
+    const blocks = new Uint8Array(totalBlocks);
     const sampleIndex = (x: number, y: number, z: number) =>
       y * sampleSize * sampleSize + (z + 1) * sampleSize + (x + 1);
 
@@ -438,6 +447,40 @@ export class VoxelWorld {
       }
     }
 
+    // --- Lighting calculation ---
+    const skyLight = new Uint8Array(totalBlocks);
+    const blkLight = new Uint8Array(totalBlocks);
+
+    // Sky light: trace down each column, flood fill
+    const skyQ: number[] = [];
+    for (let z = -1; z <= CHUNK_SIZE; z++) {
+      for (let x = -1; x <= CHUNK_SIZE; x++) {
+        for (let y = maxY - 1; y >= 0; y--) {
+          const i = sampleIndex(x, y, z);
+          if (isOpaqueBlock(blocks[i])) break;
+          skyLight[i] = 15;
+          skyQ.push(x, y, z);
+        }
+      }
+    }
+    floodLight(skyLight, skyQ, blocks, sampleSize, maxY, sampleIndex);
+
+    // Block light: torches emit 14
+    const blkQ: number[] = [];
+    for (let y = 0; y < maxY; y++) {
+      for (let z = -1; z <= CHUNK_SIZE; z++) {
+        for (let x = -1; x <= CHUNK_SIZE; x++) {
+          const i = sampleIndex(x, y, z);
+          if (blocks[i] === BlockId.Torch) {
+            blkLight[i] = 14;
+            blkQ.push(x, y, z);
+          }
+        }
+      }
+    }
+    floodLight(blkLight, blkQ, blocks, sampleSize, maxY, sampleIndex);
+
+    // --- Build faces ---
     for (let y = 0; y < maxY; y++) {
       for (let z = 0; z < CHUNK_SIZE; z++) {
         for (let x = 0; x < CHUNK_SIZE; x++) {
@@ -445,6 +488,7 @@ export class VoxelWorld {
           if (block === BlockId.Air) continue;
 
           const isWaterBlock = block === BlockId.Water;
+          const isTorchBlock = block === BlockId.Torch;
 
           for (let face = 0; face < FACE_DEFS.length; face++) {
             const def = FACE_DEFS[face];
@@ -455,15 +499,40 @@ export class VoxelWorld {
                 ? BlockId.Air
                 : blocks[sampleIndex(x + def.dir[0], neighborY, z + def.dir[2])];
 
-            if (isWaterBlock) {
-              // Water face only against Air (not against other water or solids)
-              if (neighbor !== BlockId.Air) continue;
-              pushFace(waterBuf, x, y, z, block, face, waterFaces);
-              waterFaces++;
+            // Get light from the neighbor block (the space this face looks into)
+            let sl = 15, bl = 0;
+            if (neighborY >= 0 && neighborY < maxY) {
+              const ni = sampleIndex(x + def.dir[0], neighborY, z + def.dir[2]);
+              sl = skyLight[ni];
+              bl = blkLight[ni];
+            } else if (neighborY < 0) {
+              sl = 0; bl = 0;
+            }
+
+            // Calculate vertex color from light
+            const MIN_LIGHT = 0.04;
+            let r: number, g: number, b: number;
+            if (bl > sl) {
+              const t = MIN_LIGHT + (bl / 15) * (1 - MIN_LIGHT);
+              r = t; g = t * 0.82; b = t * 0.55;
             } else {
-              // Solid face against Air or Water
+              const t = MIN_LIGHT + (sl / 15) * (1 - MIN_LIGHT);
+              r = t; g = t; b = t;
+            }
+
+            if (isWaterBlock) {
+              if (neighbor !== BlockId.Air && neighbor !== BlockId.Torch) continue;
+              pushFace(waterBuf, x, y, z, block, face, waterFaces, r, g, b);
+              waterFaces++;
+            } else if (isTorchBlock) {
+              // Torch: show faces against air/water only, always bright
               if (neighbor !== BlockId.Air && neighbor !== BlockId.Water) continue;
-              pushFace(solidBuf, x, y, z, block, face, solidFaces);
+              pushFace(solidBuf, x, y, z, block, face, solidFaces, 1.0, 0.9, 0.6);
+              solidFaces++;
+            } else {
+              // Solid face against Air, Water, or Torch
+              if (neighbor !== BlockId.Air && neighbor !== BlockId.Water && neighbor !== BlockId.Torch) continue;
+              pushFace(solidBuf, x, y, z, block, face, solidFaces, r, g, b);
               solidFaces++;
             }
           }
@@ -671,12 +740,45 @@ function hasTreeForBiome(x: number, z: number, biome: Biome) {
   return density > 0.58 && randomness > 0.73; // Plains
 }
 
+// --- Lighting helpers ---
+function isOpaqueBlock(block: number): boolean {
+  return block !== BlockId.Air && block !== BlockId.Water && block !== BlockId.Leaves && block !== BlockId.Torch;
+}
+
+const FLOOD_DIRS = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+
+function floodLight(
+  light: Uint8Array, queue: number[], blocks: Uint8Array,
+  sampleSize: number, maxY: number,
+  sampleIndex: (x: number, y: number, z: number) => number
+) {
+  let head = 0;
+  const maxCoord = sampleSize - 2; // = CHUNK_SIZE
+  while (head < queue.length) {
+    const sx = queue[head++], sy = queue[head++], sz = queue[head++];
+    const currentLight = light[sampleIndex(sx, sy, sz)];
+    if (currentLight <= 1) continue;
+    for (const dir of FLOOD_DIRS) {
+      const nx = sx + dir[0], ny = sy + dir[1], nz = sz + dir[2];
+      if (nx < -1 || nx > maxCoord || nz < -1 || nz > maxCoord || ny < 0 || ny >= maxY) continue;
+      const ni = sampleIndex(nx, ny, nz);
+      if (isOpaqueBlock(blocks[ni])) continue;
+      const newLight = currentLight - 1;
+      if (newLight > light[ni]) {
+        light[ni] = newLight;
+        queue.push(nx, ny, nz);
+      }
+    }
+  }
+}
+
 // --- Geometry helpers ---
 function buildGeometry(buffers: MeshBuffers) {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(buffers.positions, 3));
   geometry.setAttribute("normal", new THREE.Float32BufferAttribute(buffers.normals, 3));
   geometry.setAttribute("uv", new THREE.Float32BufferAttribute(buffers.uvs, 2));
+  geometry.setAttribute("color", new THREE.Float32BufferAttribute(buffers.colors, 3));
   geometry.setIndex(buffers.indices);
   geometry.computeBoundingSphere();
   return geometry;
@@ -686,7 +788,7 @@ function buildGeometry(buffers: MeshBuffers) {
 const uvCache: { u0: number; v0: number; u1: number; v1: number }[] = [];
 for (let i = 0; i < ATLAS_COLS * ATLAS_ROWS; i++) uvCache.push(uvForTile(i));
 
-function pushFace(buffers: MeshBuffers, x: number, y: number, z: number, block: BlockId, faceIndex: number, faceCount: number) {
+function pushFace(buffers: MeshBuffers, x: number, y: number, z: number, block: BlockId, faceIndex: number, faceCount: number, r: number, g: number, b: number) {
   const def = FACE_DEFS[faceIndex];
   const uv = uvCache[blockFaceTile(block, faceIndex)];
   const c = def.corners;
@@ -699,6 +801,7 @@ function pushFace(buffers: MeshBuffers, x: number, y: number, z: number, block: 
   );
   buffers.normals.push(dx, dy, dz, dx, dy, dz, dx, dy, dz, dx, dy, dz);
   buffers.uvs.push(uv.u0, uv.v1, uv.u0, uv.v0, uv.u1, uv.v0, uv.u1, uv.v1);
+  buffers.colors.push(r, g, b, r, g, b, r, g, b, r, g, b);
   const base = faceCount * 4;
   buffers.indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
 }
@@ -723,6 +826,7 @@ function blockFaceTile(block: BlockId, faceIndex: number) {
   }
   if (block === BlockId.Cactus) return faceIndex === 2 || faceIndex === 3 ? TEXTURE_INDEX.cactusTop : TEXTURE_INDEX.cactusSide;
   if (block === BlockId.IronOre) return TEXTURE_INDEX.ironOre;
+  if (block === BlockId.Torch) return TEXTURE_INDEX.torch;
   return TEXTURE_INDEX.stone;
 }
 
@@ -837,6 +941,7 @@ function createAtlasTexture() {
   drawSwampGrassTop(ctx, 14);
   drawSwampGrassSide(ctx, 15);
   drawIronOre(ctx, 16);
+  drawTorch(ctx, 17);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.magFilter = THREE.NearestFilter;
@@ -998,6 +1103,15 @@ function drawSwampGrassSide(ctx: CanvasRenderingContext2D, tile: number) {
   }
   sprinkle(ctx, tile, "#5a2810", 52, 0.21, 5);
   addTileRim(ctx, tile, "#a07030", "#402010");
+}
+
+function drawTorch(ctx: CanvasRenderingContext2D, tile: number) {
+  paintBase(ctx, tile, "#e8a030");
+  checker(ctx, tile, "#e09028", "#f0b038");
+  sprinkle(ctx, tile, "#ffe080", 131, 0.2);
+  sprinkle(ctx, tile, "#fff8d0", 143, 0.1);
+  sprinkle(ctx, tile, "#c07818", 151, 0.12);
+  addTileRim(ctx, tile, "#ffe8a0", "#a06010");
 }
 
 function drawIronOre(ctx: CanvasRenderingContext2D, tile: number) {

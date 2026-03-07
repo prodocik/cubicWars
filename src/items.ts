@@ -23,6 +23,7 @@ export const allItems: HotbarItem[] = [
   { id: "snow", label: "Снег", kind: "block", block: BlockId.Snow },
   { id: "cactus", label: "Кактус", kind: "block", block: BlockId.Cactus },
   { id: "iron_ore", label: "Железная руда", kind: "block", block: BlockId.IronOre },
+  { id: "torch", label: "Факел", kind: "block", block: BlockId.Torch },
   { id: "axe", label: "Топор", kind: "tool", icon: "\u{1FA93}" },
   { id: "pickaxe", label: "Кирка", kind: "tool", icon: "\u26CF\uFE0F" },
   { id: "bow", label: "Лук", kind: "tool", icon: "\u{1F3F9}" },
@@ -36,7 +37,12 @@ export function getItemByBlock(block: BlockId): HotbarItem | undefined {
   return allItems.find(item => item.block === block);
 }
 
-const defaultHotbarIds = ["axe", "pickaxe", "bow"];
+const defaultHotbar: { id: string; count?: number }[] = [
+  { id: "axe" },
+  { id: "pickaxe" },
+  { id: "bow" },
+  { id: "torch", count: 16 },
+];
 
 export function loadHotbar(): (HotbarItem | null)[] {
   const slots: (HotbarItem | null)[] = new Array(HOTBAR_SIZE).fill(null);
@@ -56,10 +62,11 @@ export function loadHotbar(): (HotbarItem | null)[] {
       return slots;
     } catch { /* ignore */ }
   }
-  for (let i = 0; i < HOTBAR_SIZE; i++) {
-    const item = getItemById(defaultHotbarIds[i]);
+  for (let i = 0; i < defaultHotbar.length && i < HOTBAR_SIZE; i++) {
+    const cfg = defaultHotbar[i];
+    const item = getItemById(cfg.id);
     if (item) {
-      slots[i] = item.kind === "block" ? { ...item, count: 0 } : { ...item };
+      slots[i] = item.kind === "block" ? { ...item, count: cfg.count ?? 0 } : { ...item };
     }
   }
   return slots;
@@ -173,5 +180,6 @@ export function tileIndexForBlock(block: BlockId) {
   if (block === BlockId.Snow) return 10;
   if (block === BlockId.Cactus) return 12;
   if (block === BlockId.IronOre) return 16;
+  if (block === BlockId.Torch) return 17;
   return 3;
 }

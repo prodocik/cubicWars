@@ -12,6 +12,7 @@ export const BLOCK_COLORS: Record<number, number[]> = {
   [BlockId.Snow]: [0xf0f4f8, 0xe8ecf0, 0xd0d8e0],
   [BlockId.Cactus]: [0x2a8030, 0x308838, 0x40a048],
   [BlockId.IronOre]: [0x8f9fb0, 0xc08040, 0x9a6830],
+  [BlockId.Torch]: [0xe8a030, 0xf0b038, 0xc07818],
 };
 
 export function getRequiredHits(block: BlockId, tool: string): number {
@@ -37,6 +38,7 @@ export function getRequiredHits(block: BlockId, tool: string): number {
   if (block === BlockId.Log) return 4;
   if (block === BlockId.Leaves) return 2;
   if (block === BlockId.Cactus) return 3;
+  if (block === BlockId.Torch) return 1;
   return 5;
 }
 
