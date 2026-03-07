@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BlockId } from "./voxelWorld";
+import { BlockId, isTorchBlock } from "./voxelWorld";
 import type { VoxelWorld } from "./voxelWorld";
 
 export interface HotbarItem {
@@ -34,7 +34,8 @@ export function getItemById(id: string): HotbarItem | undefined {
 }
 
 export function getItemByBlock(block: BlockId): HotbarItem | undefined {
-  return allItems.find(item => item.block === block);
+  const lookupBlock = isTorchBlock(block) ? BlockId.Torch : block;
+  return allItems.find(item => item.block === lookupBlock);
 }
 
 const defaultHotbar: { id: string; count?: number }[] = [
@@ -194,6 +195,43 @@ export function createArrowMesh() {
   return group;
 }
 
+export function isTorchItem(item: HotbarItem): boolean {
+  return item.kind === "block" && item.block === BlockId.Torch;
+}
+
+export function drawTorchIcon(canvas: HTMLCanvasElement) {
+  const ctx = canvas.getContext("2d")!;
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  // Brown stick
+  const stickW = w * 0.15;
+  const stickH = h * 0.55;
+  const stickX = (w - stickW) / 2;
+  const stickY = h * 0.35;
+  ctx.fillStyle = "#8b5a2b";
+  ctx.fillRect(stickX, stickY, stickW, stickH);
+  // Stick highlight
+  ctx.fillStyle = "#a06830";
+  ctx.fillRect(stickX, stickY, stickW * 0.4, stickH);
+
+  // Orange flame
+  const flameW = w * 0.3;
+  const flameH = h * 0.3;
+  const flameX = (w - flameW) / 2;
+  const flameY = stickY - flameH + 2;
+  ctx.fillStyle = "#f0a020";
+  ctx.fillRect(flameX, flameY, flameW, flameH);
+  // Bright center
+  ctx.fillStyle = "#ffe060";
+  const innerW = flameW * 0.5;
+  const innerH = flameH * 0.5;
+  ctx.fillRect(flameX + (flameW - innerW) / 2, flameY + (flameH - innerH) / 2, innerW, innerH);
+  // Top tip
+  ctx.fillStyle = "#f08010";
+  ctx.fillRect(flameX + flameW * 0.2, flameY - 1, flameW * 0.6, 2);
+}
+
 export function tileIndexForBlock(block: BlockId) {
   if (block === BlockId.Grass) return 0;
   if (block === BlockId.Dirt) return 2;
@@ -204,6 +242,6 @@ export function tileIndexForBlock(block: BlockId) {
   if (block === BlockId.Snow) return 10;
   if (block === BlockId.Cactus) return 12;
   if (block === BlockId.IronOre) return 16;
-  if (block === BlockId.Torch) return 17;
+  if (isTorchBlock(block)) return 17;
   return 3;
 }

@@ -33,6 +33,14 @@ export enum BlockId {
   Cactus = 10,
   IronOre = 11,
   Torch = 12,
+  TorchN = 13,
+  TorchS = 14,
+  TorchE = 15,
+  TorchW = 16,
+}
+
+export function isTorchBlock(block: BlockId): boolean {
+  return block >= BlockId.Torch && block <= BlockId.TorchW;
 }
 
 export enum Biome {
@@ -223,11 +231,11 @@ export class VoxelWorld {
   }
 
   isSolid(block: BlockId) {
-    return block !== BlockId.Air && block !== BlockId.Water && block !== BlockId.Torch;
+    return block !== BlockId.Air && block !== BlockId.Water && !isTorchBlock(block);
   }
 
   isCollidable(block: BlockId) {
-    return block !== BlockId.Air && block !== BlockId.Water && block !== BlockId.Torch;
+    return block !== BlockId.Air && block !== BlockId.Water && !isTorchBlock(block);
   }
 
   isWater(block: BlockId) {
@@ -277,7 +285,7 @@ export class VoxelWorld {
 
     for (let i = 0; i < 256 && distance <= maxDistance; i++) {
       const block = this.getBlock(current.x, current.y, current.z);
-      if (this.isSolid(block) || block === BlockId.Torch) {
+      if (this.isSolid(block) || isTorchBlock(block)) {
         return { block: current.clone(), place: previous.clone(), normal: normal.clone(), distance };
       }
 
@@ -471,7 +479,7 @@ export class VoxelWorld {
       for (let z = -1; z <= CHUNK_SIZE; z++) {
         for (let x = -1; x <= CHUNK_SIZE; x++) {
           const i = sampleIndex(x, y, z);
-          if (blocks[i] === BlockId.Torch) {
+          if (isTorchBlock(blocks[i] as BlockId)) {
             blkLight[i] = 14;
             blkQ.push(x, y, z);
           }
@@ -488,8 +496,8 @@ export class VoxelWorld {
           if (block === BlockId.Air) continue;
 
           // Torch: custom thin geometry (stick + flame)
-          if (block === BlockId.Torch) {
-            solidFaces = pushTorchGeometry(solidBuf, x, y, z, solidFaces);
+          if (isTorchBlock(block as BlockId)) {
+            solidFaces = pushTorchGeometry(solidBuf, x, y, z, solidFaces, block as BlockId);
             continue;
           }
 
@@ -526,12 +534,12 @@ export class VoxelWorld {
             }
 
             if (isWaterBlock) {
-              if (neighbor !== BlockId.Air && neighbor !== BlockId.Torch) continue;
+              if (neighbor !== BlockId.Air && !isTorchBlock(neighbor as BlockId)) continue;
               pushFace(waterBuf, x, y, z, block, face, waterFaces, r, g, b);
               waterFaces++;
             } else {
               // Solid face against Air, Water, or Torch
-              if (neighbor !== BlockId.Air && neighbor !== BlockId.Water && neighbor !== BlockId.Torch) continue;
+              if (neighbor !== BlockId.Air && neighbor !== BlockId.Water && !isTorchBlock(neighbor as BlockId)) continue;
               pushFace(solidBuf, x, y, z, block, face, solidFaces, r, g, b);
               solidFaces++;
             }
@@ -742,7 +750,7 @@ function hasTreeForBiome(x: number, z: number, biome: Biome) {
 
 // --- Lighting helpers ---
 function isOpaqueBlock(block: number): boolean {
-  return block !== BlockId.Air && block !== BlockId.Water && block !== BlockId.Leaves && block !== BlockId.Torch;
+  return block !== BlockId.Air && block !== BlockId.Water && block !== BlockId.Leaves && !isTorchBlock(block as BlockId);
 }
 
 const FLOOD_DIRS = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
@@ -789,13 +797,83 @@ const uvCache: { u0: number; v0: number; u1: number; v1: number }[] = [];
 for (let i = 0; i < ATLAS_COLS * ATLAS_ROWS; i++) uvCache.push(uvForTile(i));
 
 // --- Torch custom geometry ---
-function pushTorchGeometry(buf: MeshBuffers, bx: number, by: number, bz: number, fc: number): number {
-  // Brown stick: 2/16 wide, 10/16 tall, centered
-  fc = pushBox(buf, bx, by, bz, 7/16, 0, 7/16, 9/16, 10/16, 9/16,
-    TEXTURE_INDEX.logSide, TEXTURE_INDEX.logTop, fc, 0.75, 0.6, 0.4);
-  // Orange flame head: 3/16 wide, 5/16 tall, on top of stick
-  fc = pushBox(buf, bx, by, bz, 6.5/16, 9/16, 6.5/16, 9.5/16, 14/16, 9.5/16,
-    TEXTURE_INDEX.torch, TEXTURE_INDEX.torch, fc, 1.0, 0.95, 0.7);
+function pushTorchGeometry(buf: MeshBuffers, bx: number, by: number, bz: number, fc: number, block: BlockId = BlockId.Torch): number {
+  if (block === BlockId.Torch) {
+    // Floor torch: upright, centered
+    fc = pushBox(buf, bx, by, bz, 7/16, 0, 7/16, 9/16, 10/16, 9/16,
+      TEXTURE_INDEX.logSide, TEXTURE_INDEX.logTop, fc, 0.75, 0.6, 0.4);
+    fc = pushBox(buf, bx, by, bz, 6.5/16, 9/16, 6.5/16, 9.5/16, 14/16, 9.5/16,
+      TEXTURE_INDEX.torch, TEXTURE_INDEX.torch, fc, 1.0, 0.95, 0.7);
+    return fc;
+  }
+  // Wall-mounted torch: tilted geometry using pushRotatedBox
+  // Tilt angle ~22 degrees
+  const angle = 0.38;
+  let dx = 0, dz = 0;
+  let rotAxis: "z" | "x" = "z";
+  let rotSign = 1;
+  if (block === BlockId.TorchE) { dx = 5/16; rotAxis = "z"; rotSign = 1; }    // mounted on -X wall, leans +X
+  else if (block === BlockId.TorchW) { dx = -5/16; rotAxis = "z"; rotSign = -1; } // mounted on +X wall, leans -X
+  else if (block === BlockId.TorchS) { dz = 5/16; rotAxis = "x"; rotSign = -1; } // mounted on -Z wall, leans +Z
+  else if (block === BlockId.TorchN) { dz = -5/16; rotAxis = "x"; rotSign = 1; }  // mounted on +Z wall, leans -Z
+
+  fc = pushRotatedBox(buf, bx, by, bz, dx, dz,
+    7/16, 0, 7/16, 9/16, 10/16, 9/16,
+    TEXTURE_INDEX.logSide, TEXTURE_INDEX.logTop, fc, 0.75, 0.6, 0.4,
+    rotAxis, angle * rotSign);
+  fc = pushRotatedBox(buf, bx, by, bz, dx, dz,
+    6.5/16, 9/16, 6.5/16, 9.5/16, 14/16, 9.5/16,
+    TEXTURE_INDEX.torch, TEXTURE_INDEX.torch, fc, 1.0, 0.95, 0.7,
+    rotAxis, angle * rotSign);
+  return fc;
+}
+
+function pushRotatedBox(
+  buf: MeshBuffers, ox: number, oy: number, oz: number,
+  shiftX: number, shiftZ: number,
+  x0: number, y0: number, z0: number, x1: number, y1: number, z1: number,
+  sideTile: number, topTile: number, fc: number,
+  r: number, g: number, b: number,
+  rotAxis: "x" | "z", rotAngle: number
+): number {
+  const su = uvCache[sideTile], tu = uvCache[topTile];
+  const cosA = Math.cos(rotAngle), sinA = Math.sin(rotAngle);
+  const cx = 0.5, cy = 0.5, cz = 0.5; // pivot at block center
+
+  function rotate(px: number, py: number, pz: number): [number, number, number] {
+    // Apply shift then rotate around center
+    let lx = px + shiftX - cx, ly = py - cy, lz = pz + shiftZ - cz;
+    if (rotAxis === "z") {
+      const rx = lx * cosA - ly * sinA;
+      const ry = lx * sinA + ly * cosA;
+      return [rx + cx, ry + cy, lz + cz];
+    } else {
+      const rz = lz * cosA - ly * sinA;
+      const ry = lz * sinA + ly * cosA;
+      return [lx + cx, ry + cy, rz + cz];
+    }
+  }
+
+  const faces: { c: number[][]; n: number[]; uv: typeof su }[] = [
+    { c: [[x1,y0,z0],[x1,y1,z0],[x1,y1,z1],[x1,y0,z1]], n: [1,0,0], uv: su },
+    { c: [[x0,y0,z1],[x0,y1,z1],[x0,y1,z0],[x0,y0,z0]], n: [-1,0,0], uv: su },
+    { c: [[x0,y1,z1],[x1,y1,z1],[x1,y1,z0],[x0,y1,z0]], n: [0,1,0], uv: tu },
+    { c: [[x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1]], n: [0,-1,0], uv: tu },
+    { c: [[x1,y0,z1],[x1,y1,z1],[x0,y1,z1],[x0,y0,z1]], n: [0,0,1], uv: su },
+    { c: [[x0,y0,z0],[x0,y1,z0],[x1,y1,z0],[x1,y0,z0]], n: [0,0,-1], uv: su },
+  ];
+  for (const f of faces) {
+    for (const v of f.c) {
+      const [rx, ry, rz] = rotate(v[0], v[1], v[2]);
+      buf.positions.push(ox + rx, oy + ry, oz + rz);
+    }
+    buf.normals.push(f.n[0],f.n[1],f.n[2], f.n[0],f.n[1],f.n[2], f.n[0],f.n[1],f.n[2], f.n[0],f.n[1],f.n[2]);
+    buf.uvs.push(f.uv.u0,f.uv.v1, f.uv.u0,f.uv.v0, f.uv.u1,f.uv.v0, f.uv.u1,f.uv.v1);
+    buf.colors.push(r,g,b, r,g,b, r,g,b, r,g,b);
+    const base = fc * 4;
+    buf.indices.push(base, base+1, base+2, base, base+2, base+3);
+    fc++;
+  }
   return fc;
 }
 
@@ -864,7 +942,7 @@ function blockFaceTile(block: BlockId, faceIndex: number) {
   }
   if (block === BlockId.Cactus) return faceIndex === 2 || faceIndex === 3 ? TEXTURE_INDEX.cactusTop : TEXTURE_INDEX.cactusSide;
   if (block === BlockId.IronOre) return TEXTURE_INDEX.ironOre;
-  if (block === BlockId.Torch) return TEXTURE_INDEX.torch;
+  if (isTorchBlock(block)) return TEXTURE_INDEX.torch;
   return TEXTURE_INDEX.stone;
 }
 

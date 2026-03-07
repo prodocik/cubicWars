@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BlockId, EYE_HEIGHT } from "./voxelWorld";
+import { BlockId, EYE_HEIGHT, isTorchBlock } from "./voxelWorld";
 import { MINE_INTERVAL } from "./constants";
 
 export const BLOCK_COLORS: Record<number, number[]> = {
@@ -38,7 +38,7 @@ export function getRequiredHits(block: BlockId, tool: string): number {
   if (block === BlockId.Log) return 4;
   if (block === BlockId.Leaves) return 2;
   if (block === BlockId.Cactus) return 3;
-  if (block === BlockId.Torch) return 1;
+  if (isTorchBlock(block)) return 1;
   return 5;
 }
 
@@ -120,7 +120,8 @@ export function spawnBreakParticles(
   bx: number, by: number, bz: number, block: BlockId,
   scene: THREE.Scene, particles: BreakParticle[], playerPos: THREE.Vector3
 ) {
-  const colors = BLOCK_COLORS[block] || [0x808080];
+  const colorKey = isTorchBlock(block) ? BlockId.Torch : block;
+  const colors = BLOCK_COLORS[colorKey] || [0x808080];
   const center = new THREE.Vector3(bx + 0.5, by + 0.5, bz + 0.5);
   const count = 12;
   for (let i = 0; i < count; i++) {

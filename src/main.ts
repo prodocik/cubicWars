@@ -13,6 +13,7 @@ import {
   RENDER_DISTANCE,
   VoxelWorld,
   setWorldSeed,
+  isTorchBlock,
 } from "./voxelWorld";
 import {
   MOVE_SPEED, SPRINT_MULTIPLIER, GRAVITY, JUMP_VELOCITY,
@@ -601,8 +602,21 @@ function placeBlock() {
   if (!hit) return;
   const place = hit.place;
   if (intersectsPlayer(place)) return;
-  world.setBlock(place.x, place.y, place.z, selected.block);
-  sendBlockUpdate(place.x, place.y, place.z, selected.block);
+
+  let blockToPlace = selected.block;
+  // If placing a torch, choose variant based on surface normal
+  if (blockToPlace === BlockId.Torch) {
+    const n = hit.normal;
+    if (n.x === 1) blockToPlace = BlockId.TorchE;       // placed on -X wall face
+    else if (n.x === -1) blockToPlace = BlockId.TorchW;  // placed on +X wall face
+    else if (n.z === 1) blockToPlace = BlockId.TorchS;   // placed on -Z wall face
+    else if (n.z === -1) blockToPlace = BlockId.TorchN;   // placed on +Z wall face
+    // n.y === 1 → floor torch, stays BlockId.Torch
+    // n.y === -1 → ceiling, stays as floor torch
+  }
+
+  world.setBlock(place.x, place.y, place.z, blockToPlace);
+  sendBlockUpdate(place.x, place.y, place.z, blockToPlace);
   // Consume resource
   if (selected.count !== undefined) {
     selected.count--;
@@ -616,13 +630,15 @@ function placeBlock() {
 }
 
 function collectMinedBlock(block: BlockId) {
-  const itemDef = getItemByBlock(block);
+  // All torch variants collect as base Torch
+  const collectBlock = isTorchBlock(block) ? BlockId.Torch : block;
+  const itemDef = getItemByBlock(collectBlock);
   if (!itemDef) return;
 
   // Try to stack into existing hotbar slot with same block
   for (let i = 0; i < hotbarItems.length; i++) {
     const slot = hotbarItems[i];
-    if (slot && slot.kind === "block" && slot.block === block) {
+    if (slot && slot.kind === "block" && slot.block === collectBlock) {
       slot.count = (slot.count ?? 0) + 1;
       saveHotbar(hotbarItems);
       reRenderHotbar();

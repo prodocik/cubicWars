@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { MAX_CHAT_LENGTH, MAX_HP } from "./constants";
 import { CHUNK_SIZE } from "./voxelWorld";
 import type { VoxelWorld } from "./voxelWorld";
-import { tileIndexForBlock } from "./items";
+import { tileIndexForBlock, isTorchItem, drawTorchIcon } from "./items";
 import type { HotbarItem } from "./items";
 
 export interface HudElements {
@@ -156,7 +156,13 @@ export function renderHotbar(hud: HudElements, slots: (HotbarItem | null)[], sel
     key.style.cssText = "position:absolute;top:3px;left:5px;font-size:9px;color:#9db0bc";
     slot.appendChild(key);
 
-    if (item && item.kind === "block" && item.block !== undefined) {
+    if (item && isTorchItem(item)) {
+      const icon = document.createElement("canvas");
+      icon.width = 32;
+      icon.height = 32;
+      drawTorchIcon(icon);
+      slot.appendChild(icon);
+    } else if (item && item.kind === "block" && item.block !== undefined) {
       const icon = document.createElement("canvas");
       icon.width = 32;
       icon.height = 32;

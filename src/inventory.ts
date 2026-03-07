@@ -1,4 +1,4 @@
-import { allItems, HOTBAR_SIZE, saveHotbar, tileIndexForBlock } from "./items";
+import { allItems, HOTBAR_SIZE, saveHotbar, tileIndexForBlock, isTorchItem, drawTorchIcon } from "./items";
 import type { HotbarItem } from "./items";
 import type { VoxelWorld } from "./voxelWorld";
 
@@ -169,7 +169,14 @@ function createSlotElement(item: HotbarItem | null, world: VoxelWorld, isHotbarS
 
   if (!item) return cell;
 
-  if (item.kind === "block" && item.block !== undefined) {
+  if (isTorchItem(item)) {
+    const icon = document.createElement("canvas");
+    icon.width = 32;
+    icon.height = 32;
+    icon.style.cssText = "pointer-events:none";
+    drawTorchIcon(icon);
+    cell.appendChild(icon);
+  } else if (item.kind === "block" && item.block !== undefined) {
     const icon = document.createElement("canvas");
     icon.width = 32;
     icon.height = 32;
@@ -209,7 +216,13 @@ function startDrag(e: MouseEvent, item: HotbarItem, type: "hotbar" | "inventory"
   ghostEl.style.left = e.clientX + "px";
   ghostEl.style.top = e.clientY + "px";
 
-  if (worldRef && item.kind === "block" && item.block !== undefined) {
+  if (isTorchItem(item)) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 32;
+    canvas.height = 32;
+    drawTorchIcon(canvas);
+    ghostEl.appendChild(canvas);
+  } else if (worldRef && item.kind === "block" && item.block !== undefined) {
     const canvas = document.createElement("canvas");
     canvas.width = 32;
     canvas.height = 32;
