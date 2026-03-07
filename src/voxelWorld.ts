@@ -560,9 +560,12 @@ function sampleBiome(x: number, z: number): Biome {
 
 // --- Terrain blocks ---
 function stoneOrOre(x: number, y: number, z: number): BlockId {
-  // Use 3D noise to create ore clusters; ~1/3 of stone becomes iron ore
-  const oreNoise = value3D(x * 0.12, y * 0.12, z * 0.12, 7777 + worldSeed);
-  return oreNoise > 0.58 ? BlockId.IronOre : BlockId.Stone;
+  // Combine multiple noise octaves at different scales for irregular blob-shaped clusters
+  const n1 = value3D(x * 0.08, y * 0.11, z * 0.08, 7777 + worldSeed);
+  const n2 = value3D(x * 0.22 + 50, y * 0.18 - 30, z * 0.22 + 70, 8888 + worldSeed) * 0.4;
+  const n3 = value3D(x * 0.45 - 20, y * 0.35 + 40, z * 0.45 + 10, 9999 + worldSeed) * 0.15;
+  const oreNoise = n1 + n2 + n3;
+  return oreNoise > 0.92 ? BlockId.IronOre : BlockId.Stone;
 }
 
 function sampleTerrain(x: number, y: number, z: number, surface: number, biome: Biome): BlockId {

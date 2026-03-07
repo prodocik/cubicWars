@@ -36,7 +36,7 @@ export function getItemByBlock(block: BlockId): HotbarItem | undefined {
   return allItems.find(item => item.block === block);
 }
 
-const defaultHotbarIds = ["grass", "dirt", "stone", "log", "leaves", "axe", "pickaxe", "bow", "sand"];
+const defaultHotbarIds = ["axe", "pickaxe", "bow"];
 
 export function loadHotbar(): (HotbarItem | null)[] {
   const slots: (HotbarItem | null)[] = new Array(HOTBAR_SIZE).fill(null);
