@@ -798,6 +798,11 @@ function updateDeathState(dt: number) {
   player.deathCountdown -= dt;
   const remaining = Math.max(0, Math.ceil(player.deathCountdown));
   hud.deathTimer.textContent = `\u0412\u043E\u0441\u043A\u0440\u0435\u0448\u0435\u043D\u0438\u0435 \u0447\u0435\u0440\u0435\u0437 ${remaining}...`;
+  // Local respawn fallback if server doesn't respond
+  if (player.deathCountdown <= 0) {
+    const spawn = world.getSpawnPosition();
+    localPlayerRespawn(spawn.x, spawn.y, spawn.z);
+  }
 }
 
 function localPlayerDie() {
