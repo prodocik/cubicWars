@@ -159,18 +159,18 @@ export function createBowMesh() {
 
 export function createTorchMesh() {
   const group = new THREE.Group();
-  // Brown stick
+  // Brown stick (half-size)
   const stick = new THREE.Mesh(
-    new THREE.BoxGeometry(0.08, 0.55, 0.08),
+    new THREE.BoxGeometry(0.05, 0.32, 0.05),
     new THREE.MeshLambertMaterial({ color: 0x8b5a2b })
   );
-  stick.position.set(0, -0.05, 0);
-  // Orange flame
+  stick.position.set(0, -0.02, 0);
+  // Orange flame (half-size)
   const flame = new THREE.Mesh(
-    new THREE.BoxGeometry(0.14, 0.2, 0.14),
+    new THREE.BoxGeometry(0.08, 0.12, 0.08),
     new THREE.MeshLambertMaterial({ color: 0xf0a020, emissive: 0xf08010, emissiveIntensity: 0.6 })
   );
-  flame.position.set(0, 0.28, 0);
+  flame.position.set(0, 0.16, 0);
   group.add(stick, flame);
   group.rotation.set(0.3, 0.6, 0.15);
   group.position.set(0.05, -0.15, 0);

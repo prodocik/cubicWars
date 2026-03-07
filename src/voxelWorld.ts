@@ -797,60 +797,69 @@ const uvCache: { u0: number; v0: number; u1: number; v1: number }[] = [];
 for (let i = 0; i < ATLAS_COLS * ATLAS_ROWS; i++) uvCache.push(uvForTile(i));
 
 // --- Torch custom geometry ---
+// Half-size torch: 1/16 stick width, 5/16 stick height, 2/16 flame width, 2.5/16 flame height
 function pushTorchGeometry(buf: MeshBuffers, bx: number, by: number, bz: number, fc: number, block: BlockId = BlockId.Torch): number {
+  // Stick: 1/16 wide, 5/16 tall, centered at x=8/16, z=8/16
+  const s0 = 7.5/16, s1 = 8.5/16; // x/z bounds
+  const sH = 5/16;                  // stick height
+  // Flame: 2/16 wide, 2.5/16 tall
+  const f0 = 7/16, f1 = 9/16;
+  const fBot = sH;
+  const fTop = sH + 2.5/16;
+
   if (block === BlockId.Torch) {
-    // Floor torch: upright, centered
-    fc = pushBox(buf, bx, by, bz, 7/16, 0, 7/16, 9/16, 10/16, 9/16,
+    fc = pushBox(buf, bx, by, bz, s0, 0, s0, s1, sH, s1,
       TEXTURE_INDEX.logSide, TEXTURE_INDEX.logTop, fc, 0.75, 0.6, 0.4);
-    fc = pushBox(buf, bx, by, bz, 6.5/16, 9/16, 6.5/16, 9.5/16, 14/16, 9.5/16,
+    fc = pushBox(buf, bx, by, bz, f0, fBot, f0, f1, fTop, f1,
       TEXTURE_INDEX.torch, TEXTURE_INDEX.torch, fc, 1.0, 0.95, 0.7);
     return fc;
   }
-  // Wall-mounted torch: tilted geometry using pushRotatedBox
-  // Tilt angle ~22 degrees
-  const angle = 0.38;
-  let dx = 0, dz = 0;
+
+  // Wall-mounted: pivot at base near wall, tilt ~25° away from wall
+  const tilt = 0.44;
+  // Wall base height (stick starts partway up the block)
+  const wallY = 0.3;
+  // Pivot is at the wall surface, at wallY height, centered in z
+  let pivotX = 0.5, pivotZ = 0.5;
   let rotAxis: "z" | "x" = "z";
   let rotSign = 1;
-  if (block === BlockId.TorchE) { dx = 5/16; rotAxis = "z"; rotSign = 1; }    // mounted on -X wall, leans +X
-  else if (block === BlockId.TorchW) { dx = -5/16; rotAxis = "z"; rotSign = -1; } // mounted on +X wall, leans -X
-  else if (block === BlockId.TorchS) { dz = 5/16; rotAxis = "x"; rotSign = -1; } // mounted on -Z wall, leans +Z
-  else if (block === BlockId.TorchN) { dz = -5/16; rotAxis = "x"; rotSign = 1; }  // mounted on +Z wall, leans -Z
 
-  fc = pushRotatedBox(buf, bx, by, bz, dx, dz,
-    7/16, 0, 7/16, 9/16, 10/16, 9/16,
+  if (block === BlockId.TorchE) { pivotX = 0; rotAxis = "z"; rotSign = 1; }       // wall at x=0, lean +X
+  else if (block === BlockId.TorchW) { pivotX = 1; rotAxis = "z"; rotSign = -1; }  // wall at x=1, lean -X
+  else if (block === BlockId.TorchS) { pivotZ = 0; rotAxis = "x"; rotSign = -1; }  // wall at z=0, lean +Z
+  else if (block === BlockId.TorchN) { pivotZ = 1; rotAxis = "x"; rotSign = 1; }   // wall at z=1, lean -Z
+
+  const angle = tilt * rotSign;
+  fc = pushWallTorchBox(buf, bx, by, bz, s0, 0, s0, s1, sH, s1,
     TEXTURE_INDEX.logSide, TEXTURE_INDEX.logTop, fc, 0.75, 0.6, 0.4,
-    rotAxis, angle * rotSign);
-  fc = pushRotatedBox(buf, bx, by, bz, dx, dz,
-    6.5/16, 9/16, 6.5/16, 9.5/16, 14/16, 9.5/16,
+    rotAxis, angle, pivotX, wallY, pivotZ);
+  fc = pushWallTorchBox(buf, bx, by, bz, f0, fBot, f0, f1, fTop, f1,
     TEXTURE_INDEX.torch, TEXTURE_INDEX.torch, fc, 1.0, 0.95, 0.7,
-    rotAxis, angle * rotSign);
+    rotAxis, angle, pivotX, wallY, pivotZ);
   return fc;
 }
 
-function pushRotatedBox(
+function pushWallTorchBox(
   buf: MeshBuffers, ox: number, oy: number, oz: number,
-  shiftX: number, shiftZ: number,
   x0: number, y0: number, z0: number, x1: number, y1: number, z1: number,
   sideTile: number, topTile: number, fc: number,
   r: number, g: number, b: number,
-  rotAxis: "x" | "z", rotAngle: number
+  rotAxis: "x" | "z", rotAngle: number,
+  pivotX: number, pivotY: number, pivotZ: number
 ): number {
   const su = uvCache[sideTile], tu = uvCache[topTile];
   const cosA = Math.cos(rotAngle), sinA = Math.sin(rotAngle);
-  const cx = 0.5, cy = 0.5, cz = 0.5; // pivot at block center
 
-  function rotate(px: number, py: number, pz: number): [number, number, number] {
-    // Apply shift then rotate around center
-    let lx = px + shiftX - cx, ly = py - cy, lz = pz + shiftZ - cz;
+  function transform(px: number, py: number, pz: number): [number, number, number] {
+    let lx = px - pivotX, ly = py - pivotY, lz = pz - pivotZ;
     if (rotAxis === "z") {
       const rx = lx * cosA - ly * sinA;
       const ry = lx * sinA + ly * cosA;
-      return [rx + cx, ry + cy, lz + cz];
+      return [rx + pivotX, ry + pivotY, lz + pivotZ];
     } else {
       const rz = lz * cosA - ly * sinA;
       const ry = lz * sinA + ly * cosA;
-      return [lx + cx, ry + cy, rz + cz];
+      return [lx + pivotX, ry + pivotY, rz + pivotZ];
     }
   }
 
@@ -864,7 +873,7 @@ function pushRotatedBox(
   ];
   for (const f of faces) {
     for (const v of f.c) {
-      const [rx, ry, rz] = rotate(v[0], v[1], v[2]);
+      const [rx, ry, rz] = transform(v[0], v[1], v[2]);
       buf.positions.push(ox + rx, oy + ry, oz + rz);
     }
     buf.normals.push(f.n[0],f.n[1],f.n[2], f.n[0],f.n[1],f.n[2], f.n[0],f.n[1],f.n[2], f.n[0],f.n[1],f.n[2]);
