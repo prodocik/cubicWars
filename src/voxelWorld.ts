@@ -487,8 +487,13 @@ export class VoxelWorld {
           const block = blocks[sampleIndex(x, y, z)];
           if (block === BlockId.Air) continue;
 
+          // Torch: custom thin geometry (stick + flame)
+          if (block === BlockId.Torch) {
+            solidFaces = pushTorchGeometry(solidBuf, x, y, z, solidFaces);
+            continue;
+          }
+
           const isWaterBlock = block === BlockId.Water;
-          const isTorchBlock = block === BlockId.Torch;
 
           for (let face = 0; face < FACE_DEFS.length; face++) {
             const def = FACE_DEFS[face];
@@ -524,11 +529,6 @@ export class VoxelWorld {
               if (neighbor !== BlockId.Air && neighbor !== BlockId.Torch) continue;
               pushFace(waterBuf, x, y, z, block, face, waterFaces, r, g, b);
               waterFaces++;
-            } else if (isTorchBlock) {
-              // Torch: show faces against air/water only, always bright
-              if (neighbor !== BlockId.Air && neighbor !== BlockId.Water) continue;
-              pushFace(solidBuf, x, y, z, block, face, solidFaces, 1.0, 0.9, 0.6);
-              solidFaces++;
             } else {
               // Solid face against Air, Water, or Torch
               if (neighbor !== BlockId.Air && neighbor !== BlockId.Water && neighbor !== BlockId.Torch) continue;
@@ -787,6 +787,44 @@ function buildGeometry(buffers: MeshBuffers) {
 // Pre-cache UV tiles
 const uvCache: { u0: number; v0: number; u1: number; v1: number }[] = [];
 for (let i = 0; i < ATLAS_COLS * ATLAS_ROWS; i++) uvCache.push(uvForTile(i));
+
+// --- Torch custom geometry ---
+function pushTorchGeometry(buf: MeshBuffers, bx: number, by: number, bz: number, fc: number): number {
+  // Brown stick: 2/16 wide, 10/16 tall, centered
+  fc = pushBox(buf, bx, by, bz, 7/16, 0, 7/16, 9/16, 10/16, 9/16,
+    TEXTURE_INDEX.logSide, TEXTURE_INDEX.logTop, fc, 0.75, 0.6, 0.4);
+  // Orange flame head: 3/16 wide, 5/16 tall, on top of stick
+  fc = pushBox(buf, bx, by, bz, 6.5/16, 9/16, 6.5/16, 9.5/16, 14/16, 9.5/16,
+    TEXTURE_INDEX.torch, TEXTURE_INDEX.torch, fc, 1.0, 0.95, 0.7);
+  return fc;
+}
+
+function pushBox(
+  buf: MeshBuffers, ox: number, oy: number, oz: number,
+  x0: number, y0: number, z0: number, x1: number, y1: number, z1: number,
+  sideTile: number, topTile: number, fc: number,
+  r: number, g: number, b: number
+): number {
+  const su = uvCache[sideTile], tu = uvCache[topTile];
+  const faces: { c: number[][]; n: number[]; uv: typeof su }[] = [
+    { c: [[x1,y0,z0],[x1,y1,z0],[x1,y1,z1],[x1,y0,z1]], n: [1,0,0], uv: su },
+    { c: [[x0,y0,z1],[x0,y1,z1],[x0,y1,z0],[x0,y0,z0]], n: [-1,0,0], uv: su },
+    { c: [[x0,y1,z1],[x1,y1,z1],[x1,y1,z0],[x0,y1,z0]], n: [0,1,0], uv: tu },
+    { c: [[x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1]], n: [0,-1,0], uv: tu },
+    { c: [[x1,y0,z1],[x1,y1,z1],[x0,y1,z1],[x0,y0,z1]], n: [0,0,1], uv: su },
+    { c: [[x0,y0,z0],[x0,y1,z0],[x1,y1,z0],[x1,y0,z0]], n: [0,0,-1], uv: su },
+  ];
+  for (const f of faces) {
+    for (const v of f.c) buf.positions.push(ox + v[0], oy + v[1], oz + v[2]);
+    buf.normals.push(f.n[0],f.n[1],f.n[2], f.n[0],f.n[1],f.n[2], f.n[0],f.n[1],f.n[2], f.n[0],f.n[1],f.n[2]);
+    buf.uvs.push(f.uv.u0,f.uv.v1, f.uv.u0,f.uv.v0, f.uv.u1,f.uv.v0, f.uv.u1,f.uv.v1);
+    buf.colors.push(r,g,b, r,g,b, r,g,b, r,g,b);
+    const base = fc * 4;
+    buf.indices.push(base, base+1, base+2, base, base+2, base+3);
+    fc++;
+  }
+  return fc;
+}
 
 function pushFace(buffers: MeshBuffers, x: number, y: number, z: number, block: BlockId, faceIndex: number, faceCount: number, r: number, g: number, b: number) {
   const def = FACE_DEFS[faceIndex];

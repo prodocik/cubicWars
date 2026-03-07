@@ -46,7 +46,7 @@ const defaultHotbar: { id: string; count?: number }[] = [
 
 export function loadHotbar(): (HotbarItem | null)[] {
   const slots: (HotbarItem | null)[] = new Array(HOTBAR_SIZE).fill(null);
-  const saved = localStorage.getItem("cubic.hotbar2");
+  const saved = localStorage.getItem("cubic.hotbar3");
   if (saved) {
     try {
       const entries = JSON.parse(saved) as ({ id: string; count?: number } | null)[];
@@ -74,7 +74,7 @@ export function loadHotbar(): (HotbarItem | null)[] {
 
 export function saveHotbar(slots: (HotbarItem | null)[]) {
   const entries = slots.map(s => s ? { id: s.id, count: s.count } : null);
-  localStorage.setItem("cubic.hotbar2", JSON.stringify(entries));
+  localStorage.setItem("cubic.hotbar3", JSON.stringify(entries));
 }
 
 // Kept for backward compat — points to the live hotbar
@@ -91,6 +91,10 @@ export function createHeldMeshFromToken(token: string, world: VoxelWorld) {
   let mesh: THREE.Object3D;
   if (token.startsWith("block:")) {
     const block = Number(token.slice(6)) as BlockId;
+    if (block === BlockId.Torch) {
+      mesh = createTorchMesh();
+      return mesh;
+    }
     mesh = world.createBlockPreview(block);
     mesh.rotation.set(0.35, 0.65, 0);
     mesh.position.set(0.1, -0.1, 0);
@@ -149,6 +153,26 @@ export function createBowMesh() {
   string.position.set(0, 0.03, -0.04);
   group.add(left, right, grip, string);
   group.rotation.set(0.5, 1.05, 0.25);
+  return group;
+}
+
+export function createTorchMesh() {
+  const group = new THREE.Group();
+  // Brown stick
+  const stick = new THREE.Mesh(
+    new THREE.BoxGeometry(0.08, 0.55, 0.08),
+    new THREE.MeshLambertMaterial({ color: 0x8b5a2b })
+  );
+  stick.position.set(0, -0.05, 0);
+  // Orange flame
+  const flame = new THREE.Mesh(
+    new THREE.BoxGeometry(0.14, 0.2, 0.14),
+    new THREE.MeshLambertMaterial({ color: 0xf0a020, emissive: 0xf08010, emissiveIntensity: 0.6 })
+  );
+  flame.position.set(0, 0.28, 0);
+  group.add(stick, flame);
+  group.rotation.set(0.3, 0.6, 0.15);
+  group.position.set(0.05, -0.15, 0);
   return group;
 }
 
