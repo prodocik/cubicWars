@@ -84,6 +84,7 @@ const BOW_COOLDOWN = 0.5;
 const MAX_HP = 100;
 const RESPAWN_COUNTDOWN = 5;
 const ARROW_HIT_RADIUS = 0.8;
+const MINE_INTERVAL = 0.28; // seconds between mining hits
 const BODY_WIDTH = PLAYER_RADIUS * 2;
 const BODY_HEIGHT = PLAYER_HEIGHT;
 const BODY_RADIUS = PLAYER_RADIUS;
@@ -117,6 +118,76 @@ interface StuckArrow {
 const flyingArrows: FlyingArrow[] = [];
 const stuckArrows: StuckArrow[] = [];
 const STUCK_ARROW_LIFETIME = 30;
+
+// --- Mining state ---
+const miningState = {
+  active: false,
+  blockX: 0,
+  blockY: 0,
+  blockZ: 0,
+  hits: 0,
+  required: 0,
+  timer: 0,
+  mouseDown: false,
+};
+
+// Block color map for break particles
+const BLOCK_COLORS: Record<number, number[]> = {
+  [BlockId.Grass]: [0x5b8c3e, 0x8b6d2c, 0x6b9a3f],
+  [BlockId.Dirt]: [0x8b6d2c, 0x6b5020, 0x9c7a3a],
+  [BlockId.Stone]: [0x808080, 0x666666, 0x999999],
+  [BlockId.Log]: [0x6b4226, 0x8b5a2b, 0x503018],
+  [BlockId.Leaves]: [0x3a8c30, 0x2e6d28, 0x4ca040],
+};
+
+function getRequiredHits(block: BlockId, tool: string): number {
+  if (tool === "pickaxe") {
+    if (block === BlockId.Dirt || block === BlockId.Grass) return 2;
+    if (block === BlockId.Stone) return 4;
+    if (block === BlockId.Log) return 4;
+    if (block === BlockId.Leaves) return 1;
+  }
+  if (tool === "axe") {
+    if (block === BlockId.Log) return 1;
+    if (block === BlockId.Leaves) return 1;
+    if (block === BlockId.Dirt || block === BlockId.Grass) return 3;
+    if (block === BlockId.Stone) return 7;
+  }
+  // Hand
+  if (block === BlockId.Dirt || block === BlockId.Grass) return 5;
+  if (block === BlockId.Stone) return 7;
+  if (block === BlockId.Log) return 4;
+  if (block === BlockId.Leaves) return 2;
+  return 5;
+}
+
+// Crack overlay
+const crackOverlayMat = new THREE.MeshBasicMaterial({
+  color: 0x000000,
+  transparent: true,
+  opacity: 0,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+  polygonOffset: true,
+  polygonOffsetFactor: -1,
+  polygonOffsetUnits: -1,
+});
+const crackOverlay = new THREE.Mesh(
+  new THREE.BoxGeometry(1.005, 1.005, 1.005),
+  crackOverlayMat
+);
+crackOverlay.visible = false;
+scene.add(crackOverlay);
+
+// Break particles
+interface BreakParticle {
+  mesh: THREE.Mesh;
+  velocity: THREE.Vector3;
+  target: THREE.Vector3;
+  life: number;
+}
+const breakParticles: BreakParticle[] = [];
+const particleGeo = new THREE.BoxGeometry(0.12, 0.12, 0.12);
 
 const cameraRig = new THREE.Group();
 const cameraPitch = new THREE.Group();
@@ -275,6 +346,8 @@ function animate() {
   if (physicsSteps === MAX_PHYSICS_STEPS) physicsAccumulator = 0;
 
   updateDeathState(frameDt);
+  updateMining(frameDt);
+  updateBreakParticles(frameDt);
   updateHeldItem(frameDt);
   updateArrows(frameDt);
   updateStuckArrows();
@@ -699,24 +772,163 @@ function wireInput() {
       if (selected.id === "bow") {
         shootArrow();
       } else {
-        breakBlock();
+        miningState.mouseDown = true;
+        hitBlock();
       }
+      swingTime = 1;
     } else if (event.button === 2) {
       placeBlock();
+      swingTime = 1;
     }
-    swingTime = 1;
+  });
+
+  window.addEventListener("mouseup", (event) => {
+    if (event.button === 0) {
+      miningState.mouseDown = false;
+      resetMining();
+    }
   });
 
   window.addEventListener("contextmenu", (event) => event.preventDefault());
 }
 
-function breakBlock() {
+function hitBlock() {
   const hit = getTargetedBlock();
   if (!hit) return;
-  const block = world.getBlock(hit.block.x, hit.block.y, hit.block.z);
-  if (block === BlockId.Bedrock) return;
-  world.setBlock(hit.block.x, hit.block.y, hit.block.z, BlockId.Air);
-  sendBlockUpdate(hit.block.x, hit.block.y, hit.block.z, BlockId.Air);
+  const bx = hit.block.x, by = hit.block.y, bz = hit.block.z;
+  const block = world.getBlock(bx, by, bz);
+  if (block === BlockId.Air || block === BlockId.Bedrock) return;
+
+  const tool = hotbarItems[selectedSlot].id;
+
+  // If targeting a different block, reset progress
+  if (miningState.blockX !== bx || miningState.blockY !== by || miningState.blockZ !== bz) {
+    miningState.blockX = bx;
+    miningState.blockY = by;
+    miningState.blockZ = bz;
+    miningState.hits = 0;
+    miningState.required = getRequiredHits(block, tool);
+  }
+
+  miningState.hits++;
+  miningState.active = true;
+  miningState.timer = 0;
+
+  if (miningState.hits >= miningState.required) {
+    // Block breaks
+    spawnBreakParticles(bx, by, bz, block);
+    world.setBlock(bx, by, bz, BlockId.Air);
+    sendBlockUpdate(bx, by, bz, BlockId.Air);
+    resetMining();
+  } else {
+    // Update crack overlay
+    updateCrackOverlay();
+  }
+}
+
+function resetMining() {
+  miningState.active = false;
+  miningState.hits = 0;
+  miningState.timer = 0;
+  crackOverlay.visible = false;
+}
+
+function updateCrackOverlay() {
+  if (!miningState.active || miningState.required <= 0) {
+    crackOverlay.visible = false;
+    return;
+  }
+  const progress = miningState.hits / miningState.required;
+  crackOverlay.position.set(
+    miningState.blockX + 0.5,
+    miningState.blockY + 0.5,
+    miningState.blockZ + 0.5
+  );
+  crackOverlayMat.opacity = progress * 0.55;
+  crackOverlay.visible = true;
+}
+
+function updateMining(dt: number) {
+  if (!miningState.mouseDown || player.dead) {
+    if (miningState.active) resetMining();
+    return;
+  }
+  if (!miningState.active) return;
+
+  miningState.timer += dt;
+  if (miningState.timer >= MINE_INTERVAL) {
+    miningState.timer -= MINE_INTERVAL;
+    swingTime = 1;
+    hitBlock();
+  }
+}
+
+function spawnBreakParticles(bx: number, by: number, bz: number, block: BlockId) {
+  const colors = BLOCK_COLORS[block] || [0x808080];
+  const center = new THREE.Vector3(bx + 0.5, by + 0.5, bz + 0.5);
+  const count = 12;
+  for (let i = 0; i < count; i++) {
+    const color = colors[i % colors.length];
+    const mat = new THREE.MeshLambertMaterial({ color });
+    const mesh = new THREE.Mesh(particleGeo, mat);
+    mesh.position.set(
+      center.x + (Math.random() - 0.5) * 0.6,
+      center.y + (Math.random() - 0.5) * 0.6,
+      center.z + (Math.random() - 0.5) * 0.6
+    );
+    scene.add(mesh);
+
+    // Initial outward burst, then attracted to player
+    const outDir = mesh.position.clone().sub(center).normalize();
+    breakParticles.push({
+      mesh,
+      velocity: outDir.multiplyScalar(3 + Math.random() * 2),
+      target: player.position,
+      life: 0,
+    });
+  }
+}
+
+function updateBreakParticles(dt: number) {
+  for (let i = breakParticles.length - 1; i >= 0; i--) {
+    const p = breakParticles[i];
+    p.life += dt;
+
+    if (p.life > 1.2) {
+      scene.remove(p.mesh);
+      (p.mesh.material as THREE.Material).dispose();
+      breakParticles.splice(i, 1);
+      continue;
+    }
+
+    // After initial burst (0.15s), attract toward player
+    if (p.life > 0.15) {
+      const toPlayer = new THREE.Vector3(
+        player.position.x,
+        player.position.y + EYE_HEIGHT * 0.5,
+        player.position.z
+      ).sub(p.mesh.position);
+      const dist = toPlayer.length();
+      if (dist < 0.3) {
+        scene.remove(p.mesh);
+        (p.mesh.material as THREE.Material).dispose();
+        breakParticles.splice(i, 1);
+        continue;
+      }
+      toPlayer.normalize().multiplyScalar(18 * dt);
+      p.velocity.add(toPlayer);
+      p.velocity.multiplyScalar(0.92);
+    }
+
+    p.velocity.y -= 8 * dt;
+    p.mesh.position.addScaledVector(p.velocity, dt);
+    p.mesh.rotation.x += dt * 5;
+    p.mesh.rotation.y += dt * 3;
+
+    // Shrink toward end
+    const scale = Math.max(0, 1 - p.life / 1.2);
+    p.mesh.scale.setScalar(scale);
+  }
 }
 
 function placeBlock() {
@@ -754,6 +966,7 @@ function intersectsPlayer(block: THREE.Vector3) {
 
 function selectSlot(index: number) {
   selectedSlot = index;
+  resetMining();
   renderHotbar();
   setHeldItem(hotbarItems[index]);
   gameLog.system(`Selected: ${hotbarItems[index].label}`);
@@ -1080,7 +1293,7 @@ function createHud() {
 
   const hint = document.createElement("div");
   hint.style.cssText = "position:absolute;left:50%;bottom:88px;transform:translateX(-50%);padding:6px 10px;border-radius:10px;background:rgba(0,0,0,0.38);font-size:12px;color:#deedde";
-  hint.textContent = "WASD move, Space jump, Enter chat, LMB break, RMB place, wheel or 1-9 select";
+  hint.textContent = "WASD move, Space jump, Enter chat, LMB mine (hold), RMB place, wheel or 1-9 select";
 
   const hotbar = document.createElement("div");
   hotbar.style.cssText = "position:absolute;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:6px;pointer-events:none";
