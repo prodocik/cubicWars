@@ -12,6 +12,7 @@ import {
   EYE_HEIGHT,
   RENDER_DISTANCE,
   VoxelWorld,
+  setWorldSeed,
 } from "./voxelWorld";
 import {
   MOVE_SPEED, SPRINT_MULTIPLIER, GRAVITY, JUMP_VELOCITY,
@@ -131,8 +132,24 @@ const input = {
   jumpQueued: false,
 };
 
+function loadSavedPosition(): THREE.Vector3 | null {
+  const saved = localStorage.getItem("cubic.playerPos");
+  if (!saved) return null;
+  try {
+    const [x, y, z] = JSON.parse(saved) as [number, number, number];
+    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+      return new THREE.Vector3(x, y, z);
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+function savePlayerPosition() {
+  localStorage.setItem("cubic.playerPos", JSON.stringify([player.position.x, player.position.y, player.position.z]));
+}
+
 const player = {
-  position: world.getSpawnPosition(),
+  position: loadSavedPosition() || world.getSpawnPosition(),
   velocity: new THREE.Vector3(),
   onGround: false,
   lastSafePosition: new THREE.Vector3(),
@@ -197,7 +214,8 @@ const title: TitleScreenUi = createTitleScreen(
     startMultiplayer(playerName, url);
   },
   () => renderer.domElement.requestPointerLock(),
-  () => startRegenVote()
+  () => startRegenVote(),
+  () => teleportToSpawn()
 );
 document.body.appendChild(title.overlay);
 document.body.appendChild(hud.voteOverlay);
@@ -213,6 +231,7 @@ window.addEventListener("resize", onResize);
 
 const clock = new THREE.Clock();
 window.setInterval(() => sendLocalPlayerState(), Math.round(1000 / SERVER_TICK_RATE));
+window.setInterval(() => savePlayerPosition(), 5000);
 animate();
 
 // --- Game loop ---
@@ -764,6 +783,18 @@ function wireInput() {
   window.addEventListener("contextmenu", (event) => event.preventDefault());
 }
 
+// --- Teleport ---
+function teleportToSpawn() {
+  const spawn = world.getSpawnPosition();
+  player.position.copy(spawn);
+  player.lastSafePosition.copy(spawn);
+  player.velocity.set(0, 0, 0);
+  player.onGround = false;
+  physicsAccumulator = 0;
+  savePlayerPosition();
+  gameLog.system("Телепортирован на спавн");
+}
+
 // --- Vote system ---
 function startRegenVote() {
   if (!networkState.connected || !networkState.ws || networkState.ws.readyState !== WebSocket.OPEN) {
@@ -890,6 +921,8 @@ function handleServerMessage(message: ServerMessage) {
     case "init": {
       networkState.myId = message.id;
       networkState.connected = true;
+      setWorldSeed(message.worldSeed);
+      world.resetAllEdits();
       clearRemotePlayers(remotePlayers, remotePlayersLayer);
       for (const edit of message.blocks) {
         world.setBlock(edit.x, edit.y, edit.z, edit.block as BlockId);

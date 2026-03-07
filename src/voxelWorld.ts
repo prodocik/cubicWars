@@ -11,6 +11,14 @@ export const WATER_LEVEL = 62;
 const CHUNK_BUILD_BUDGET = 2;
 const CHUNK_FADE_IN_SPEED = 3.5;
 
+let worldSeed = 0;
+export function setWorldSeed(seed: number) {
+  worldSeed = seed;
+}
+export function getWorldSeed() {
+  return worldSeed;
+}
+
 export enum BlockId {
   Air = 0,
   Grass = 1,
@@ -196,6 +204,8 @@ export class VoxelWorld {
   resetAllEdits() {
     this.edits.clear();
     this.editMaxY.clear();
+    this.surfaceCache.clear();
+    this.biomeCache.clear();
     // Mark all loaded chunks dirty so they rebuild from procedural generation
     for (const chunk of this.chunks.values()) {
       chunk.dirty = true;
@@ -473,7 +483,7 @@ export class VoxelWorld {
   }
 
   private sampleGeneratedBlock(x: number, y: number, z: number): BlockId {
-    const bedrockHeight = 1 + Math.floor(value2D(x * 0.15, z * 0.15, 999) * 4);
+    const bedrockHeight = 1 + Math.floor(value2D(x * 0.15, z * 0.15, 999 + worldSeed) * 4);
     if (y < bedrockHeight) return BlockId.Bedrock;
 
     const surface = this.surfaceHeight(x, z);
@@ -496,9 +506,9 @@ export class VoxelWorld {
     if (cached !== undefined) return cached;
 
     const biome = this.getBiome(x, z);
-    const continental = fbm2D(x * 0.003, z * 0.003, 4, 2) * 18;
-    const hills = fbm2D(x * 0.012, z * 0.012, 3, 11) * 7;
-    const detail = fbm2D(x * 0.04, z * 0.04, 2, 37) * 2;
+    const continental = fbm2D(x * 0.003, z * 0.003, 4, 2 + worldSeed) * 18;
+    const hills = fbm2D(x * 0.012, z * 0.012, 3, 11 + worldSeed) * 7;
+    const detail = fbm2D(x * 0.04, z * 0.04, 2, 37 + worldSeed) * 2;
 
     let baseHeight = 64;
     let heightScale = 1.0;
@@ -543,8 +553,8 @@ export class VoxelWorld {
 
 // --- Biome selection ---
 function sampleBiome(x: number, z: number): Biome {
-  const temperature = fbm2D(x * 0.008, z * 0.008, 3, 200);
-  const moisture = fbm2D(x * 0.01, z * 0.01, 3, 500);
+  const temperature = fbm2D(x * 0.008, z * 0.008, 3, 200 + worldSeed);
+  const moisture = fbm2D(x * 0.01, z * 0.01, 3, 500 + worldSeed);
 
   if (temperature < 0.32) return Biome.Snow;
   if (temperature > 0.68 && moisture < 0.38) return Biome.Desert;
@@ -608,7 +618,7 @@ function sampleCactus(
 
 function hasCactus(x: number, z: number) {
   if (x >= -8 && x <= 8 && z >= -8 && z <= 8) return false;
-  const r = value2D(x * 0.18 + 50, z * 0.18 - 30, 177);
+  const r = value2D(x * 0.18 + 50, z * 0.18 - 30, 177 + worldSeed);
   return r > 0.82;
 }
 
@@ -648,8 +658,8 @@ function sampleTreeBlock(
 
 function hasTreeForBiome(x: number, z: number, biome: Biome) {
   if (x >= -8 && x <= 8 && z >= -8 && z <= 8) return false;
-  const density = value2D(x * 0.08, z * 0.08, 71);
-  const randomness = value2D(x * 0.21 + 100, z * 0.21 - 80, 113);
+  const density = value2D(x * 0.08, z * 0.08, 71 + worldSeed);
+  const randomness = value2D(x * 0.21 + 100, z * 0.21 - 80, 113 + worldSeed);
 
   if (biome === Biome.Jungle) return density > 0.38 && randomness > 0.45;
   if (biome === Biome.Swamp) return density > 0.65 && randomness > 0.8;

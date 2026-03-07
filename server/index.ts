@@ -47,6 +47,7 @@ let nextPlayerId = 1;
 
 // --- Vote state ---
 const VOTE_DURATION_MS = 30_000;
+const VOTE_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 let voteActive = false;
 let voteInitiator = "";
 let voteYes = new Set<string>();
@@ -54,6 +55,7 @@ let voteNo = new Set<string>();
 let voteTimer: ReturnType<typeof setTimeout> | null = null;
 let voteCountdownInterval: ReturnType<typeof setInterval> | null = null;
 let voteStartTime = 0;
+let lastVoteEndTime = 0;
 
 // --- SQLite persistence ---
 const DB_PATH = process.env.DB_PATH || "world.db";
@@ -68,6 +70,32 @@ db.exec(`
     PRIMARY KEY (x, y, z)
   )
 `);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS world_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  )
+`);
+
+// --- World seed ---
+function generateWorldSeed() {
+  return Math.floor(Math.random() * 0x7fffffff);
+}
+
+const stmtGetMeta = db.prepare("SELECT value FROM world_meta WHERE key = ?");
+const stmtSetMeta = db.prepare("INSERT INTO world_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+
+let worldSeed: number;
+{
+  const row = stmtGetMeta.get("worldSeed") as { value: string } | undefined;
+  if (row) {
+    worldSeed = Number(row.value);
+  } else {
+    worldSeed = generateWorldSeed();
+    stmtSetMeta.run("worldSeed", String(worldSeed));
+  }
+}
+console.log(`World seed: ${worldSeed}`);
 
 const stmtUpsert = db.prepare(
   "INSERT INTO block_edits (x, y, z, block) VALUES (?, ?, ?, ?) ON CONFLICT(x, y, z) DO UPDATE SET block = excluded.block"
@@ -333,6 +361,12 @@ function handleStartVote(player: ServerPlayer) {
     sendTo(player.ws, { type: "chat", id: "", name: "Server", text: "Голосование уже идёт!" });
     return;
   }
+  const cooldownLeft = VOTE_COOLDOWN_MS - (Date.now() - lastVoteEndTime);
+  if (cooldownLeft > 0) {
+    const mins = Math.ceil(cooldownLeft / 60000);
+    sendTo(player.ws, { type: "chat", id: "", name: "Server", text: `Голосование будет доступно через ${mins} мин.` });
+    return;
+  }
   if (players.size < 1) return;
 
   voteActive = true;
@@ -400,6 +434,7 @@ function resolveVote() {
   const passed = voteYes.size > voteNo.size;
   broadcast({ type: "vote_result", passed, yes: voteYes.size, no: voteNo.size });
   voteActive = false;
+  lastVoteEndTime = Date.now();
 
   if (passed) {
     // Wait a moment for clients to see the result, then reset
@@ -408,11 +443,15 @@ function resolveVote() {
 }
 
 function resetWorld() {
+  // Generate new world seed
+  worldSeed = generateWorldSeed();
+  stmtSetMeta.run("worldSeed", String(worldSeed));
+
   // Clear all block edits from memory and DB
   blockEdits.clear();
   db.exec("DELETE FROM block_edits");
   biomeCache.clear();
-  console.log("World reset: cleared all block edits");
+  console.log(`World reset: new seed ${worldSeed}`);
 
   // Broadcast world_reset — clients will disconnect and reconnect
   broadcast({ type: "world_reset" });
@@ -445,8 +484,8 @@ function getBiome(x: number, z: number): Biome {
 }
 
 function sampleBiome(x: number, z: number): Biome {
-  const temperature = fbm2D(x * 0.008, z * 0.008, 3, 200);
-  const moisture = fbm2D(x * 0.01, z * 0.01, 3, 500);
+  const temperature = fbm2D(x * 0.008, z * 0.008, 3, 200 + worldSeed);
+  const moisture = fbm2D(x * 0.01, z * 0.01, 3, 500 + worldSeed);
 
   if (temperature < 0.32) return Biome.Snow;
   if (temperature > 0.68 && moisture < 0.38) return Biome.Desert;
@@ -456,7 +495,7 @@ function sampleBiome(x: number, z: number): Biome {
 }
 
 function sampleGeneratedBlock(x: number, y: number, z: number): BlockId {
-  const bedrockHeight = 1 + Math.floor(value2D(x * 0.15, z * 0.15, 999) * 4);
+  const bedrockHeight = 1 + Math.floor(value2D(x * 0.15, z * 0.15, 999 + worldSeed) * 4);
   if (y < bedrockHeight) return BlockId.Bedrock;
 
   const surface = surfaceHeight(x, z);
@@ -497,9 +536,9 @@ function sampleTerrain(x: number, y: number, z: number, surface: number, biome: 
 
 function surfaceHeight(x: number, z: number) {
   const biome = getBiome(x, z);
-  const continental = fbm2D(x * 0.003, z * 0.003, 4, 2) * 18;
-  const hills = fbm2D(x * 0.012, z * 0.012, 3, 11) * 7;
-  const detail = fbm2D(x * 0.04, z * 0.04, 2, 37) * 2;
+  const continental = fbm2D(x * 0.003, z * 0.003, 4, 2 + worldSeed) * 18;
+  const hills = fbm2D(x * 0.012, z * 0.012, 3, 11 + worldSeed) * 7;
+  const detail = fbm2D(x * 0.04, z * 0.04, 2, 37 + worldSeed) * 2;
 
   let baseHeight = 64;
   let heightScale = 1.0;
@@ -532,7 +571,7 @@ function sampleCactus(x: number, y: number, z: number): BlockId {
 
 function hasCactus(x: number, z: number) {
   if (x >= -8 && x <= 8 && z >= -8 && z <= 8) return false;
-  const r = value2D(x * 0.18 + 50, z * 0.18 - 30, 177);
+  const r = value2D(x * 0.18 + 50, z * 0.18 - 30, 177 + worldSeed);
   return r > 0.82;
 }
 
@@ -568,8 +607,8 @@ function sampleTreeBlock(x: number, y: number, z: number, biome: Biome): BlockId
 
 function hasTreeForBiome(x: number, z: number, biome: Biome) {
   if (x >= -8 && x <= 8 && z >= -8 && z <= 8) return false;
-  const density = value2D(x * 0.08, z * 0.08, 71);
-  const randomness = value2D(x * 0.21 + 100, z * 0.21 - 80, 113);
+  const density = value2D(x * 0.08, z * 0.08, 71 + worldSeed);
+  const randomness = value2D(x * 0.21 + 100, z * 0.21 - 80, 113 + worldSeed);
 
   if (biome === Biome.Jungle) return density > 0.38 && randomness > 0.45;
   if (biome === Biome.Swamp) return density > 0.65 && randomness > 0.8;
@@ -777,6 +816,7 @@ wss.on("connection", (ws) => {
         type: "init",
         id: player.id,
         tickRate: SERVER_TICK_RATE,
+        worldSeed,
         players: Array.from(players.values()).map(playerPublicState),
         blocks: serializeBlockEdits(),
       });

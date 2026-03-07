@@ -79,6 +79,7 @@ export interface InitMessage {
   type: "init";
   id: string;
   tickRate: number;
+  worldSeed: number;
   players: RemotePlayerState[];
   blocks: BlockEditState[];
 }
