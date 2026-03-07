@@ -48,6 +48,10 @@ import {
 } from "./hud";
 import { getDefaultServerUrl, normalizeServerUrl, buildServerCandidates } from "./connection";
 import { updateTorchParticles } from "./torchParticles";
+import {
+  createRpgCrosshair, createFlashOverlay, showRpgCrosshair,
+  fireRocket, updateRockets, getExplosionDamage,
+} from "./rpg";
 import { createAppearanceSeed, isTypingInUi } from "./utils";
 
 // --- Scene setup ---
@@ -204,6 +208,10 @@ initInventory(hotbarItems, selectedSlotObj, world, () => {
 });
 const inventoryOverlay = createInventoryOverlay();
 document.body.appendChild(inventoryOverlay);
+const rpgCrosshair = createRpgCrosshair();
+document.body.appendChild(rpgCrosshair);
+const rpgFlash = createFlashOverlay();
+document.body.appendChild(rpgFlash);
 
 function reRenderHotbar() {
   renderHotbar(hud, hotbarItems, selectedSlot, world, () => toggleInventory());
@@ -271,6 +279,11 @@ function animate() {
   updateMining(frameDt, miningState, player.dead, hitBlock, () => { swingTime = 1; });
   updateBreakParticles(frameDt, scene, breakParticles, player.position);
   updateTorchParticles(frameDt, scene, world, player.position);
+  updateRockets(
+    frameDt, scene, world,
+    networkState.myId, player.dead, player.position,
+    remotePlayers, applyExplosionDamage
+  );
   updateHeldItem(frameDt);
   updateArrows(
     frameDt, combat, world, arrowsLayer,
@@ -508,6 +521,7 @@ function selectSlot(index: number) {
   reRenderHotbar();
   setHeldItem(hotbarItems[index]);
   const item = hotbarItems[index];
+  showRpgCrosshair(item?.id === "rpg");
   if (item) gameLog.system(`Selected: ${item.label}`);
   sendLocalPlayerState();
 }
@@ -715,6 +729,52 @@ function shootArrow() {
   }
 }
 
+function shootRpg() {
+  if (player.dead) return;
+  const selected = hotbarItems[selectedSlot];
+  if (!selected || selected.id !== "rpg") return;
+
+  const origin = new THREE.Vector3();
+  camera.getWorldPosition(origin);
+  const direction = new THREE.Vector3();
+  camera.getWorldDirection(direction);
+
+  fireRocket(origin, direction, networkState.myId, scene);
+
+  // Remove RPG from inventory (single-use)
+  hotbarItems[selectedSlot] = null;
+  setHeldItem(null);
+  showRpgCrosshair(false);
+  saveHotbar(hotbarItems);
+  reRenderHotbar();
+}
+
+function applyExplosionDamage(center: THREE.Vector3, _shooterId: string) {
+  // Damage local player
+  if (!player.dead) {
+    const damage = getExplosionDamage(player.position, center);
+    if (damage > 0) {
+      player.hp = Math.max(0, player.hp - damage);
+      updateHpBar(hud, player.hp);
+      if (player.hp <= 0) {
+        localPlayerDie();
+        if (networkState.connected && networkState.ws && networkState.ws.readyState === WebSocket.OPEN) {
+          networkState.ws.send(JSON.stringify({ type: "hit_player", targetId: networkState.myId }));
+        }
+      }
+    }
+  }
+
+  // Damage remote players (send hit for those in radius)
+  for (const avatar of remotePlayers.values()) {
+    if (avatar.dead) continue;
+    const damage = getExplosionDamage(avatar.root.position, center);
+    if (damage > 0) {
+      sendHitPlayer(avatar.id, networkState.myId);
+    }
+  }
+}
+
 function sendHitPlayer(targetId: string, _attackerId: string) {
   if (!networkState.connected || !networkState.ws || networkState.ws.readyState !== WebSocket.OPEN) return;
   networkState.ws.send(JSON.stringify({ type: "hit_player", targetId }));
@@ -810,6 +870,8 @@ function wireInput() {
 
   document.addEventListener("pointerlockchange", () => {
     pointerLocked = document.pointerLockElement === renderer.domElement;
+    if (!pointerLocked) showRpgCrosshair(false);
+    else showRpgCrosshair(hotbarItems[selectedSlot]?.id === "rpg");
     refreshTitleScreen();
   });
 
@@ -875,7 +937,9 @@ function wireInput() {
     if (!pointerLocked || player.dead) return;
     if (event.button === 0) {
       const selected = hotbarItems[selectedSlot];
-      if (selected?.id === "bow") {
+      if (selected?.id === "rpg") {
+        shootRpg();
+      } else if (selected?.id === "bow") {
         shootArrow();
       } else {
         miningState.mouseDown = true;

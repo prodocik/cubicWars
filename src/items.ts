@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { BlockId, isTorchBlock } from "./voxelWorld";
 import type { VoxelWorld } from "./voxelWorld";
+import { createRpgHeldMesh } from "./rpg";
 
 export interface HotbarItem {
   id: string;
@@ -27,6 +28,7 @@ export const allItems: HotbarItem[] = [
   { id: "axe", label: "Топор", kind: "tool", icon: "\u{1FA93}" },
   { id: "pickaxe", label: "Кирка", kind: "tool", icon: "\u26CF\uFE0F" },
   { id: "bow", label: "Лук", kind: "tool", icon: "\u{1F3F9}" },
+  { id: "rpg", label: "РПГ", kind: "tool", icon: "\u{1F680}" },
 ];
 
 export function getItemById(id: string): HotbarItem | undefined {
@@ -42,12 +44,13 @@ const defaultHotbar: { id: string; count?: number }[] = [
   { id: "axe" },
   { id: "pickaxe" },
   { id: "bow" },
+  { id: "rpg" },
   { id: "torch", count: 16 },
 ];
 
 export function loadHotbar(): (HotbarItem | null)[] {
   const slots: (HotbarItem | null)[] = new Array(HOTBAR_SIZE).fill(null);
-  const saved = localStorage.getItem("cubic.hotbar3");
+  const saved = localStorage.getItem("cubic.hotbar4");
   if (saved) {
     try {
       const entries = JSON.parse(saved) as ({ id: string; count?: number } | null)[];
@@ -75,7 +78,7 @@ export function loadHotbar(): (HotbarItem | null)[] {
 
 export function saveHotbar(slots: (HotbarItem | null)[]) {
   const entries = slots.map(s => s ? { id: s.id, count: s.count } : null);
-  localStorage.setItem("cubic.hotbar3", JSON.stringify(entries));
+  localStorage.setItem("cubic.hotbar4", JSON.stringify(entries));
 }
 
 // Kept for backward compat — points to the live hotbar
@@ -106,6 +109,8 @@ export function createHeldMeshFromToken(token: string, world: VoxelWorld) {
     mesh = createAxeMesh();
   } else if (token === "pickaxe") {
     mesh = createPickaxeMesh();
+  } else if (token === "rpg") {
+    mesh = createRpgHeldMesh();
   } else {
     mesh = createBowMesh();
   }
