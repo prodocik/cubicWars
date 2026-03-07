@@ -548,6 +548,24 @@ function hitBlock() {
     world.setBlock(bx, by, bz, BlockId.Air);
     sendBlockUpdate(bx, by, bz, BlockId.Air);
     resetMining(miningState);
+
+    // If still holding mouse, immediately start mining the next block
+    if (miningState.mouseDown) {
+      const nextHit = getTargetedBlock();
+      if (nextHit) {
+        const nx = nextHit.block.x, ny = nextHit.block.y, nz = nextHit.block.z;
+        const nextBlock = world.getBlock(nx, ny, nz);
+        if (nextBlock !== BlockId.Air && nextBlock !== BlockId.Bedrock) {
+          miningState.blockX = nx;
+          miningState.blockY = ny;
+          miningState.blockZ = nz;
+          miningState.hits = 0;
+          miningState.required = getRequiredHits(nextBlock, hotbarItems[selectedSlot].id);
+          miningState.active = true;
+          miningState.timer = 0;
+        }
+      }
+    }
   } else {
     updateCrackOverlay(miningState);
   }
